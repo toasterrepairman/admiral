@@ -1,5 +1,5 @@
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, HeaderBar, ActionRow };
+use adw::{Application, ApplicationWindow, HeaderBar, ActionRow, Avatar};
 use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
@@ -11,7 +11,7 @@ use glib::clone;
 #[tokio::main]
 async fn main() {
     let app = Application::builder()
-        .application_id("com.example.TwitchChatViewer")
+        .application_id("com.toaster.Admiral")
         .build();
 
     app.connect_activate(build_ui);
@@ -30,15 +30,12 @@ fn build_ui(app: &Application) {
 
     header.pack_start(&entry);
     header.pack_end(&connect_button);
-    let scroll_rules = Adjustment::new(0.0, 0.0, 100.0, 1.0, 10.0, 10.0);
-    scroll_rules.set_value(scroll_rules.upper());
 
     let listbox = ListBox::builder()
         .build();
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
-        .vadjustment(&scroll_rules)
         .hexpand(true)
         .halign(Align::Baseline)
         .child(&listbox)
@@ -76,19 +73,25 @@ fn build_ui(app: &Application) {
         while let Some(msg) = rx.recv().await {
             let message_list = message_list.clone();
             glib::MainContext::default().spawn_local(async move {
-                // let row = ListBoxRow::builder().child(&Label::new(Some(&msg))).build();
                 let row = ActionRow::builder()
                     .activatable(true)
                     .title(&msg.message_text)
                     .subtitle(format!("{} - {:?}", &msg.sender.name, &msg.server_timestamp))
                     .build();
-                message_list.lock().unwrap().append(&row);
-                // let upper = adjustment.upper(); // This is the bottom-most point
-                // adjustment.set_value(upper); // Set the value to the bottom-most point
-                // message_list.lock().unwrap().select_all();
+                // Add Message
+                message_list.lock().unwrap().prepend(&row);
+                // Cull oldest messages
+                if let Ok(mut list) = message_list.lock() {
+                    if let Some(old_mess) = list.row_at_index(50) {
+                        list.remove(&old_mess);
+                    } else {
+                        return
+                    }
+                }
             });
         }
     });
+
 
     let window = ApplicationWindow::builder()
                 .application(app)
@@ -98,5 +101,6 @@ fn build_ui(app: &Application) {
                 // add content to window
                 .content(&content)
                 .build();
+
     window.present();
 }
