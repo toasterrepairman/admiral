@@ -1,0 +1,17 @@
+[package]
+name = "admiral"
+version = "0.1.0"
+edition = "2021"
+
+[toolchain]
+channel = "nightly"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+adw = { version = "0.7.1", package = "libadwaita", features = ["v1_6"] }
+gtk = { package = "gtk4", version = "0.9.6", features = ["v4_12"] }
+glib = "0.20.9"
+gio = "0.20.9"
+tokio = { version = "1.44.0", features = ["full"] }
+twitch-irc = "5.0.1"
