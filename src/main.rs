@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, ActionRow };
-use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align};
+use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -30,10 +30,15 @@ fn build_ui(app: &Application) {
 
     header.pack_start(&entry);
     header.pack_end(&connect_button);
+    let scroll_rules = Adjustment::new(0.0, 0.0, 100.0, 1.0, 10.0, 10.0);
+    scroll_rules.set_value(scroll_rules.upper());
 
-    let listbox = ListBox::builder().build();
+    let listbox = ListBox::builder()
+        .build();
+
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
+        .vadjustment(&scroll_rules)
         .hexpand(true)
         .halign(Align::Baseline)
         .child(&listbox)
@@ -61,7 +66,7 @@ fn build_ui(app: &Application) {
 
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    let _ = tx.send(msg.message_text.clone());
+                    let _ = tx.send(msg.clone());
                 }
             }
         });
@@ -74,10 +79,13 @@ fn build_ui(app: &Application) {
                 // let row = ListBoxRow::builder().child(&Label::new(Some(&msg))).build();
                 let row = ActionRow::builder()
                     .activatable(true)
-                    .title(&msg)
-                    // .title(&msg.channel_login)
+                    .title(&msg.message_text)
+                    .subtitle(format!("{} - {:?}", &msg.sender.name, &msg.server_timestamp))
                     .build();
                 message_list.lock().unwrap().append(&row);
+                // let upper = adjustment.upper(); // This is the bottom-most point
+                // adjustment.set_value(upper); // Set the value to the bottom-most point
+                // message_list.lock().unwrap().select_all();
             });
         }
     });
