@@ -15,3 +15,4 @@ glib = "0.20.9"
 gio = "0.20.9"
 tokio = { version = "1.44.0", features = ["full"] }
 twitch-irc = "5.0.1"
+chrono = "0.4.40"

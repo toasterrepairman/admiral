@@ -7,6 +7,7 @@ use twitch_irc::login::StaticLoginCredentials;
 use tokio::sync::mpsc;
 use tokio::task;
 use glib::clone;
+use chrono::{TimeZone, NaiveDateTime, Utc, Local};
 
 #[tokio::main]
 async fn main() {
@@ -76,7 +77,9 @@ fn build_ui(app: &Application) {
                 let row = ActionRow::builder()
                     .activatable(true)
                     .title(&msg.message_text)
-                    .subtitle(format!("{} - {:?}", &msg.sender.name, &msg.server_timestamp))
+                    .subtitle(format!("{} - {}",
+                        &msg.sender.name,
+                        &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()))
                     .build();
                 // Add Message
                 message_list.lock().unwrap().prepend(&row);
@@ -95,7 +98,7 @@ fn build_ui(app: &Application) {
 
     let window = ApplicationWindow::builder()
                 .application(app)
-                .title("Chat")
+                .title("Admiral")
                 .default_width(500)
                 .default_height(600)
                 // add content to window
