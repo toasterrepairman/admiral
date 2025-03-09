@@ -62,6 +62,7 @@
 
         postBuild = ''
             # for desktop files
+            install -Dt $out/share/applications resources/groucho.desktop
         '';
       };
     in {
