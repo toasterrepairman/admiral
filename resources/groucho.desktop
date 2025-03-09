@@ -1,0 +1,21 @@
+[Desktop Entry]
+##  The name of the application ##
+Name=Admiral
+GenericName=Libadwaita Twitch chat viewer
+
+## A comment which act as a tooltip ##
+Comment=Read Twitch chat in an accessible window
+
+## The executable of the application with optional args ##
+## You can state full path too ##
+Exec=admiral
+
+## State the name of the icon that will be used to display this entry ##
+## Icon=icon-admiral
+
+## Is it a terminal app? For example htop will be set as Terminal=True ##
+## Then default terminal app will be used to open the 'htop' ##
+Terminal=false
+
+##  The type as listed  ##
+Type=Application
