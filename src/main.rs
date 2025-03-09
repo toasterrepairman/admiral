@@ -74,37 +74,35 @@ fn build_ui(app: &Application) {
 
     glib::MainContext::default().spawn_local(async move {
         while let Some(msg) = rx.recv().await {
-            let message_list = message_list.clone();
-            glib::MainContext::default().spawn_local(async move {
-                // Build message row
-                let row = ActionRow::builder()
-                    .activatable(true)
-                    .title(format!("{}", &msg.message_text))
-                    .subtitle(format!("{} - {}",
-                        &msg.sender.name,
-                        &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()))
-                    .build();
-                // Create avatar
-                let avatar = Avatar::builder()
-                    .text(&msg.sender.name)
-                    .show_initials(true)
-                    .size(32)
-                    .build();
-                row.add_prefix(&avatar);
-                // Add Message
-                message_list.lock().unwrap().prepend(&row);
-                // Cull oldest messages
-                if let Ok(mut list) = message_list.lock() {
-                    if let Some(old_mess) = list.row_at_index(100) {
-                        list.remove(&old_mess);
-                    } else {
-                        return;
-                    }
-                };
-                return
-            });
+            // Build message row outside of a new spawn_local
+            let row = ActionRow::builder()
+                .activatable(true)
+                .title(format!("{}", &msg.message_text))
+                .subtitle(format!("{} - {}",
+                    &msg.sender.name,
+                    &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()))
+                .build();
+
+            // Create avatar
+            let avatar = Avatar::builder()
+                .text(&msg.sender.name)
+                .show_initials(true)
+                .size(32)
+                .build();
+
+            row.add_prefix(&avatar);
+
+            // Single lock for both operations
+            if let Ok(mut list) = message_list.lock() {
+                // Add message
+                list.prepend(&row);
+
+                // Cull oldest messages in the same lock
+                if let Some(old_mess) = list.row_at_index(100) {
+                    list.remove(&old_mess);
+                }
+            }
         }
-        glib::MainContext::default().iteration(false);
     });
 
 
