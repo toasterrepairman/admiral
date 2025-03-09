@@ -48,13 +48,22 @@ fn build_ui(app: &Application) {
     let message_list = Arc::new(Mutex::new(listbox.clone()));
     let (tx, mut rx) = mpsc::channel(10);
 
-    connect_button.connect_clicked(clone!(@strong message_list => move |_| {
+    let active_task: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+
+    connect_button.connect_clicked(clone!(@strong message_list, @strong active_task => move |_| {
+        // Kill any existing task
+        if let Some(handle) = active_task.lock().unwrap().take() {
+            // Optionally await the task to finish or just cancel it
+            handle.abort(); // If the task is cancellable
+        }
+
         message_list.lock().unwrap().remove_all();
         let channel = entry.text().to_string();
         let tx = tx.clone();
         let message_list = message_list.clone();
 
-        task::spawn(async move {
+        // Spawn a new task
+        let new_handle = task::spawn(async move {
             let config = ClientConfig::default();
             let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
 
@@ -70,7 +79,11 @@ fn build_ui(app: &Application) {
                 }
             }
         });
+
+        // Update the active task to track the new task
+        *active_task.lock().unwrap() = Some(new_handle);
     }));
+
 
     glib::MainContext::default().spawn_local(async move {
         while let Some(msg) = rx.recv().await {
