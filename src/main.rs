@@ -46,9 +46,10 @@ fn build_ui(app: &Application) {
     content.append(&scrolled_window);
 
     let message_list = Arc::new(Mutex::new(listbox.clone()));
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(10);
 
     connect_button.connect_clicked(clone!(@strong message_list => move |_| {
+        message_list.lock().unwrap().remove_all();
         let channel = entry.text().to_string();
         let tx = tx.clone();
         let message_list = message_list.clone();
@@ -64,7 +65,8 @@ fn build_ui(app: &Application) {
 
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    let _ = tx.send(msg.clone());
+                    // Attempt to send the message. If it fails, it will be dropped.
+                    let _ = tx.try_send(msg.clone());
                 }
             }
         });
@@ -74,25 +76,35 @@ fn build_ui(app: &Application) {
         while let Some(msg) = rx.recv().await {
             let message_list = message_list.clone();
             glib::MainContext::default().spawn_local(async move {
+                // Build message row
                 let row = ActionRow::builder()
                     .activatable(true)
-                    .title(&msg.message_text)
+                    .title(format!("{}", &msg.message_text))
                     .subtitle(format!("{} - {}",
                         &msg.sender.name,
                         &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()))
                     .build();
+                // Create avatar
+                let avatar = Avatar::builder()
+                    .text(&msg.sender.name)
+                    .show_initials(true)
+                    .size(32)
+                    .build();
+                row.add_prefix(&avatar);
                 // Add Message
                 message_list.lock().unwrap().prepend(&row);
                 // Cull oldest messages
                 if let Ok(mut list) = message_list.lock() {
-                    if let Some(old_mess) = list.row_at_index(50) {
+                    if let Some(old_mess) = list.row_at_index(100) {
                         list.remove(&old_mess);
                     } else {
-                        return
+                        return;
                     }
-                }
+                };
+                return
             });
         }
+        glib::MainContext::default().iteration(false);
     });
 
 
