@@ -62,7 +62,7 @@
 
         postBuild = ''
             # for desktop files
-            install -Dt $out/share/applications resources/groucho.desktop
+            install -Dt $out/share/applications resources/admiral.desktop
         '';
       };
     in {
