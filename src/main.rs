@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use glib::clone;
 use chrono::{TimeZone, NaiveDateTime, Utc, Local};
+use gio::SimpleAction;
 
 #[tokio::main]
 async fn main() {
@@ -118,7 +119,6 @@ fn build_ui(app: &Application) {
         }
     });
 
-
     let window = ApplicationWindow::builder()
                 .application(app)
                 .title("Admiral")
@@ -127,6 +127,16 @@ fn build_ui(app: &Application) {
                 // add content to window
                 .content(&content)
                 .build();
+
+    // Create a "quit" action
+    let quit_action = SimpleAction::new("quit", None);
+    quit_action.connect_activate(glib::clone!(@weak window => move |_, _| {
+        window.close(); // Close the window instead of quitting the app
+    }));
+    window.add_action(&quit_action);
+
+    // Set up the accelerator for "quit" (Ctrl+Q)
+    app.set_accels_for_action("win.quit", &["<Control>q"]);
 
     window.present();
 }
