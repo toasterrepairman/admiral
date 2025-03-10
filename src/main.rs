@@ -47,7 +47,7 @@ fn build_ui(app: &Application) {
     content.append(&scrolled_window);
 
     let message_list = Arc::new(Mutex::new(listbox.clone()));
-    let (tx, mut rx) = mpsc::channel(10);
+    let (tx, mut rx) = mpsc::channel(100);
 
     let active_task: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
@@ -76,7 +76,9 @@ fn build_ui(app: &Application) {
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
                     // Attempt to send the message. If it fails, it will be dropped.
-                    let _ = tx.try_send(msg.clone());
+                    if tx.try_send(msg.clone()).is_err() {
+                        eprintln!("Dropped message due to full queue.");
+                    }
                 }
             }
         });
@@ -86,18 +88,13 @@ fn build_ui(app: &Application) {
     }));
 
 
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(msg) = rx.recv().await {
-            // Build message row outside of a new spawn_local
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        while let Ok(msg) = rx.try_recv() {
             let row = ActionRow::builder()
-                .activatable(true)
-                .title(format!("{}", &msg.message_text))
-                .subtitle(format!("{} - {}",
-                    &msg.sender.name,
-                    &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()))
+                .title(msg.message_text.clone())
+                .subtitle(format!("{} - {}", msg.sender.name, msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p")))
                 .build();
 
-            // Create avatar
             let avatar = Avatar::builder()
                 .text(&msg.sender.name)
                 .show_initials(true)
@@ -106,18 +103,23 @@ fn build_ui(app: &Application) {
 
             row.add_prefix(&avatar);
 
-            // Single lock for both operations
-            if let Ok(mut list) = message_list.lock() {
-                // Add message
-                list.prepend(&row);
+            let mut list = message_list.lock().unwrap();
+            list.prepend(&row);
 
-                // Cull oldest messages in the same lock
-                if let Some(old_mess) = list.row_at_index(100) {
-                    list.remove(&old_mess);
+            while list.first_child().is_some() && list.row_at_index(100).is_some() {
+                if let Some(child) = list.last_child() {
+                    if let Some(row) = child.downcast_ref::<ListBoxRow>() {
+                        list.remove(row);
+                    } else {
+                        eprintln!("Warning: Encountered non-ListBoxRow widget in ListBox!");
+                    }
                 }
             }
         }
+        glib::ControlFlow::Continue // Keep running
     });
+
+
 
     let window = ApplicationWindow::builder()
                 .application(app)
