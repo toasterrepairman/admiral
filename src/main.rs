@@ -33,6 +33,11 @@ fn build_ui(app: &Application) {
     header.pack_start(&entry);
     header.pack_end(&connect_button);
 
+    // connect entry to button press
+    entry.connect_activate(clone!(@strong connect_button => move |_| {
+        connect_button.emit_clicked();
+    }));
+
     let listbox = ListBox::builder()
         .build();
 
@@ -43,12 +48,14 @@ fn build_ui(app: &Application) {
         .child(&listbox)
         .build();
 
+    // composite window content
     content.append(&header);
     content.append(&scrolled_window);
 
+    // message list channel
     let message_list = Arc::new(Mutex::new(listbox.clone()));
     let (tx, mut rx) = mpsc::channel(100);
-
+    // task handler
     let active_task: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     connect_button.connect_clicked(clone!(@strong message_list, @strong active_task => move |_| {
@@ -87,7 +94,6 @@ fn build_ui(app: &Application) {
         *active_task.lock().unwrap() = Some(new_handle);
     }));
 
-
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(msg) = rx.try_recv() {
             let row = ActionRow::builder()
@@ -118,8 +124,6 @@ fn build_ui(app: &Application) {
         }
         glib::ControlFlow::Continue // Keep running
     });
-
-
 
     let window = ApplicationWindow::builder()
                 .application(app)
