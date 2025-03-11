@@ -98,7 +98,7 @@ fn build_ui(app: &Application) {
         *active_task.lock().unwrap() = Some(new_handle);
     }));
 
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
         while let Ok(msg) = rx.try_recv() {
             let emote_map = get_emote_map();
             let row = parse_message(&msg.clone(), &emote_map);
