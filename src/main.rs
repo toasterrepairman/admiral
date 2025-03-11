@@ -98,14 +98,17 @@ fn build_ui(app: &Application) {
         *active_task.lock().unwrap() = Some(new_handle);
     }));
 
-    glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
+    glib::idle_add_local(move || {
         while let Ok(msg) = rx.try_recv() {
             let emote_map = get_emote_map();
-            let row = parse_message(&msg.clone(), &emote_map);
+
+            // Ensure the message is fully constructed before insertion
+            let row = parse_message(&msg, &emote_map);
 
             let mut list = message_list.lock().unwrap();
             list.prepend(&row);
 
+            // Remove old messages if we exceed 100 messages
             while list.first_child().is_some() && list.row_at_index(100).is_some() {
                 if let Some(child) = list.last_child() {
                     if let Some(row) = child.downcast_ref::<ListBoxRow>() {
@@ -116,8 +119,9 @@ fn build_ui(app: &Application) {
                 }
             }
         }
-        glib::ControlFlow::Continue // Keep running
+        glib::ControlFlow::Continue
     });
+
 
     let window = ApplicationWindow::builder()
                 .application(app)
