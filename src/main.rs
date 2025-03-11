@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, ActionRow, Avatar};
-use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment};
+use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment, Image, Widget};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -9,6 +9,10 @@ use tokio::task;
 use glib::clone;
 use chrono::{TimeZone, NaiveDateTime, Utc, Local};
 use gio::SimpleAction;
+use std::collections::HashMap;
+
+mod emotes;
+use crate::emotes::{get_emote_map, parse_message};
 
 #[tokio::main]
 async fn main() {
@@ -43,7 +47,7 @@ fn build_ui(app: &Application) {
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
-        .hexpand(true)
+        .hexpand(false)
         .halign(Align::Baseline)
         .child(&listbox)
         .build();
@@ -96,18 +100,8 @@ fn build_ui(app: &Application) {
 
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(msg) = rx.try_recv() {
-            let row = ActionRow::builder()
-                .title(msg.message_text.clone())
-                .subtitle(format!("{} - {}", msg.sender.name, msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p")))
-                .build();
-
-            let avatar = Avatar::builder()
-                .text(&msg.sender.name)
-                .show_initials(true)
-                .size(32)
-                .build();
-
-            row.add_prefix(&avatar);
+            let emote_map = get_emote_map();
+            let row = parse_message(&msg.clone(), &emote_map);
 
             let mut list = message_list.lock().unwrap();
             list.prepend(&row);
