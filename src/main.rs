@@ -25,6 +25,13 @@ async fn main() {
 }
 
 fn build_ui(app: &Application) {
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("Admiral")
+        .default_width(500)
+        .default_height(600)
+        .build();
+
     let header = HeaderBar::builder()
         .show_title(true)
         .css_classes(["flat"])
@@ -122,15 +129,7 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
-
-    let window = ApplicationWindow::builder()
-                .application(app)
-                .title("Admiral")
-                .default_width(500)
-                .default_height(600)
-                // add content to window
-                .content(&content)
-                .build();
+    window.set_content(Some(&content));
 
     // Create a "quit" action
     let quit_action = SimpleAction::new("quit", None);
