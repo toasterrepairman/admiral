@@ -100,7 +100,7 @@ fn build_ui(app: &Application) {
 
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(msg) = rx.try_recv() {
-            let emote_map = get_emote_map(&msg.channel_login);
+            let emote_map = get_emote_map();
 
             // Ensure the message is fully constructed before insertion
             let row = parse_message(&msg, &emote_map);
