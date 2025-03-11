@@ -4,11 +4,34 @@ use std::collections::HashMap;
 use twitch_irc::message::PrivmsgMessage;
 use chrono::Local;
 use twitch_irc::message::RGBColor;
+use std::fs;
 
-pub fn get_emote_map() -> HashMap<String, String> {
+pub fn get_emote_map(channel: &str) -> HashMap<String, String> {
     let mut emotes = HashMap::new();
-    emotes.insert("Kappa".to_string(), "/path/to/kappa.png".to_string());
-    emotes.insert("PogChamp".to_string(), "/path/to/pogchamp.png".to_string());
+
+    // Build the path to the channel's emote directory
+    let home = dirs::home_dir().unwrap_or_default();
+    let emote_dir = home.join(".config/admiral/emotes").join(channel);
+
+    // Read the directory if it exists
+    if let Ok(entries) = fs::read_dir(&emote_dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_file() {
+                    if let Some(file_name) = entry.file_name().to_str() {
+                        // Only process image files (you might want to add more extensions)
+                        if file_name.ends_with(".png") || file_name.ends_with(".gif") {
+                            // Remove the extension to get the emote name
+                            if let Some(emote_name) = file_name.split('.').next() {
+                                let relative_path = format!("~/.config/admiral/emotes/{}/{}", channel, file_name);
+                                emotes.insert(emote_name.to_string(), relative_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     emotes
 }
 
