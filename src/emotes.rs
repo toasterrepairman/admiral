@@ -74,12 +74,12 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     if let Some(color) = &msg.name_color {
         let color_hex = rgb_to_hex(color);
         sender_label.set_markup(&format!(
-            "<span foreground=\"{}\"><b>{}</b></span> - {}",
+            "<span foreground=\"{}\"><b>{}</b></span> - <i>{}</i>",
             color_hex,
             glib::markup_escape_text(&msg.sender.name),
             &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()));
     } else {
-        sender_label.set_markup(&format!("<b>{}</b> - {}",
+        sender_label.set_markup(&format!("<b>{}</b> - <i>{}</i>",
             &msg.sender.name,
             &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p")));
     }
