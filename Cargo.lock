@@ -27,6 +27,7 @@ dependencies = [
  "glib",
  "gtk4",
  "libadwaita",
+ "libsecret",
  "reqwest",
  "serde_json",
  "shellexpand",
@@ -1063,6 +1064,32 @@ checksum = "c0ff37bd590ca25063e35af745c343cb7a0271906fb7b37e4813e8f79f00268d"
 dependencies = [
  "bitflags",
  "libc",
+]
+
+[[package]]
+name = "libsecret"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed48c3c2b757067b21f693e8de3dd6ad4ba37508c8cc2c2bc8d0c2f16b5896b9"
+dependencies = [
+ "gio",
+ "glib",
+ "libc",
+ "libsecret-sys",
+]
+
+[[package]]
+name = "libsecret-sys"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b2ed075a9bb4deae8110ba9a2cf5a05fafa9ba588a3c2148eee56040ac5a302"
+dependencies = [
+ "gio-sys",
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "pkg-config",
+ "system-deps",
 ]
 
 [[package]]

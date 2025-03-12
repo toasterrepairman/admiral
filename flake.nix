@@ -38,6 +38,7 @@
         meson
         git
         wrapGAppsHook4
+        libsecret
         # llvmPackages.libclang
         #
         # cudaPackages.cuda_nvcc

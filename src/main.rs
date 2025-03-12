@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, ActionRow, Avatar};
-use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment, Image, Widget};
+use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment, Image, Widget, MenuButton, Popover, Button as GtkButton};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -25,6 +25,9 @@ async fn main() {
 }
 
 fn build_ui(app: &Application) {
+    //////////////////////
+    // Main application //
+    //////////////////////
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Admiral")
@@ -36,13 +39,28 @@ fn build_ui(app: &Application) {
         .show_title(true)
         .css_classes(["flat"])
         .build();
+
     let entry = Entry::builder().placeholder_text("Enter channel name").build();
-    let connect_button = Button::builder().label("Connect").build();
+    let connect_button = GtkButton::builder().label("Connect").build();
+    let login_button = GtkButton::builder().label("Log In").build();
+
+    let popover_box = Box::new(Orientation::Vertical, 5);
+        popover_box.append(&connect_button);
+        popover_box.append(&login_button);
+
+    let popover = Popover::builder()
+        .child(&popover_box)
+        .build();
+
+    let menu_button = MenuButton::builder()
+        .popover(&popover)
+        .build();
+
     // Combine the content in a box
     let content = Box::new(Orientation::Vertical, 0);
 
     header.pack_start(&entry);
-    header.pack_end(&connect_button);
+    header.pack_end(&menu_button);
 
     // connect entry to button press
     entry.connect_activate(clone!(@strong connect_button => move |_| {
@@ -72,8 +90,7 @@ fn build_ui(app: &Application) {
     connect_button.connect_clicked(clone!(@strong message_list, @strong active_task => move |_| {
         // Kill any existing task
         if let Some(handle) = active_task.lock().unwrap().take() {
-            // Optionally await the task to finish or just cancel it
-            handle.abort(); // If the task is cancellable
+            handle.abort();
         }
 
         message_list.lock().unwrap().remove_all();
@@ -81,7 +98,6 @@ fn build_ui(app: &Application) {
         let tx = tx.clone();
         let message_list = message_list.clone();
 
-        // Spawn a new task
         let new_handle = task::spawn(async move {
             let config = ClientConfig::default();
             let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
@@ -93,7 +109,6 @@ fn build_ui(app: &Application) {
 
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    // Attempt to send the message. If it fails, it will be dropped.
                     if tx.try_send(msg.clone()).is_err() {
                         eprintln!("Dropped message due to full queue.");
                     }
@@ -101,7 +116,6 @@ fn build_ui(app: &Application) {
             }
         });
 
-        // Update the active task to track the new task
         *active_task.lock().unwrap() = Some(new_handle);
     }));
 
@@ -109,13 +123,11 @@ fn build_ui(app: &Application) {
         while let Ok(msg) = rx.try_recv() {
             let emote_map = get_emote_map();
 
-            // Ensure the message is fully constructed before insertion
             let row = parse_message(&msg, &emote_map);
 
             let mut list = message_list.lock().unwrap();
             list.prepend(&row);
 
-            // Remove old messages if we exceed 100 messages
             while list.first_child().is_some() && list.row_at_index(100).is_some() {
                 if let Some(child) = list.last_child() {
                     if let Some(row) = child.downcast_ref::<ListBoxRow>() {
@@ -131,14 +143,12 @@ fn build_ui(app: &Application) {
 
     window.set_content(Some(&content));
 
-    // Create a "quit" action
     let quit_action = SimpleAction::new("quit", None);
     quit_action.connect_activate(glib::clone!(@weak window => move |_, _| {
-        window.close(); // Close the window instead of quitting the app
+        window.close();
     }));
     window.add_action(&quit_action);
 
-    // Set up the accelerator for "quit" (Ctrl+Q)
     app.set_accels_for_action("win.quit", &["<Control>q"]);
 
     window.present();

@@ -89,9 +89,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.set_margin_bottom(4);
     container.set_margin_start(6);
     container.set_margin_end(6);
-    container.set_hexpand(true);
-    container.set_vexpand(true);
-    container.set_homogeneous(false);
     // Message row (single line of text + emotes)
     let message_box = Box::new(Orientation::Horizontal, 3);
 
