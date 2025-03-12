@@ -67,12 +67,6 @@ fn rgb_to_hex(color: &RGBColor) -> String {
 }
 
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
-    let container = Box::new(Orientation::Vertical, 0);
-    container.set_margin_top(4);
-    container.set_margin_bottom(4);
-    container.set_margin_start(6);
-    container.set_margin_end(6);
-
     // Sender's name with color
     let sender_label = Label::new(Some(&msg.sender.name));
     sender_label.set_xalign(0.0);
@@ -85,10 +79,16 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             glib::markup_escape_text(&msg.sender.name),
             &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()));
     } else {
-        sender_label.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&msg.sender.name)));
+        sender_label.set_markup(&format!("<b>{}</b> - {}",
+            &msg.sender.name,
+            &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p")));
     }
 
-    container.append(&sender_label);
+    let container = Box::new(Orientation::Vertical, 0);
+    container.set_margin_top(4);
+    container.set_margin_bottom(4);
+    container.set_margin_start(6);
+    container.set_margin_end(6);
 
     // Message row (single line of text + emotes)
     let message_box = Box::new(Orientation::Horizontal, 2);
@@ -108,5 +108,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     }
 
     container.append(&message_box);
+    container.prepend(&sender_label);
     container.upcast::<Widget>()
 }
