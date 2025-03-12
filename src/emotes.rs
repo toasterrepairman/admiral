@@ -39,28 +39,6 @@ pub fn get_emote_map() -> HashMap<String, Emote> {
     emotes
 }
 
-fn download_emote(emote: &Emote) {
-    let local_path = shellexpand::tilde(&emote.local_path).to_string();
-    let path = Path::new(&local_path);
-
-    if !path.exists() {
-        let response = get(&emote.url).expect("Failed to download emote");
-        let mut file = File::create(path).expect("Failed to create file");
-
-        let content = response.bytes().expect("Failed to read response body");
-        file.write_all(&content).expect("Failed to write to file");
-        println!("Downloaded emote: {}", emote.name);
-    }
-}
-
-fn download_missing_emotes(emotes: &HashMap<String, Emote>) {
-    let emotes = Arc::new(Mutex::new(emotes.clone()));
-
-    for emote in emotes.lock().unwrap().values() {
-        download_emote(&emote);
-    }
-}
-
 /// Converts an `RGBColor` to a CSS hex string like "#RRGGBB"
 fn rgb_to_hex(color: &RGBColor) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)

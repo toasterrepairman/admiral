@@ -11,8 +11,10 @@ use chrono::{TimeZone, NaiveDateTime, Utc, Local};
 use gio::SimpleAction;
 use std::collections::HashMap;
 
+mod auth;
 mod emotes;
 use crate::emotes::{get_emote_map, parse_message};
+use crate::auth::create_auth_window;
 
 #[tokio::main]
 async fn main() {
@@ -65,6 +67,10 @@ fn build_ui(app: &Application) {
     // connect entry to button press
     entry.connect_activate(clone!(@strong connect_button => move |_| {
         connect_button.emit_clicked();
+    }));
+
+    login_button.connect_clicked(clone!(@strong app => move |_| {
+        create_auth_window(&app);
     }));
 
     let listbox = ListBox::builder()
