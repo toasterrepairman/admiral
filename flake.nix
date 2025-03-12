@@ -64,6 +64,7 @@
         postBuild = ''
             # for desktop files
             install -Dt $out/share/applications resources/admiral.desktop
+            install -Dt $out/share/icons resources/admiral.png
         '';
       };
     in {
