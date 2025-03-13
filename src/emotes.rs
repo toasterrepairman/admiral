@@ -15,26 +15,46 @@ pub struct Emote {
     local_path: String,
 }
 
-pub fn get_emote_map() -> HashMap<String, Emote> {
+#[derive(Debug, Clone)]
+pub struct ChannelInfo {
+    pub name: String,
+    pub id: String,
+}
+
+pub fn get_emote_map(channel: &ChannelInfo) -> HashMap<String, Emote> {
     let mut emotes = HashMap::new();
 
-    emotes.insert(
-        "Kappa".to_string(),
-        Emote {
-            name: "Kappa".to_string(),
-            url: "https://example.com/kappa.png".to_string(),
-            local_path: "~/.config/admiral/emotes/kappa.png".to_string(),
-        },
-    );
+    // Helper function to fetch and add emotes
+    let mut fetch_emotes = |platform: &str, url: &str| {
+        if let Ok(response) = get(url) {
+            if let Ok(json) = response.json::<serde_json::Value>() {
+                if let Some(emote_list) = json.as_array() {
+                    for emote in emote_list {
+                        if let (Some(name), Some(emote_url)) = (emote["name"].as_str(), emote["url"].as_str()) {
+                            let local_path = format!("~/.config/admiral/emotes/{}/{}.png", platform, name);
+                            emotes.insert(
+                                name.to_string(),
+                                Emote {
+                                    name: name.to_string(),
+                                    url: emote_url.to_string(),
+                                    local_path,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    };
 
-    emotes.insert(
-        "PogChamp".to_string(),
-        Emote {
-            name: "PogChamp".to_string(),
-            url: "https://example.com/pogchamp.png".to_string(),
-            local_path: "~/.config/admiral/emotes/pog.png".to_string(),
-        },
-    );
+    // Fetch BTTV emotes
+    fetch_emotes("bttv", &format!("https://api.betterttv.net/3/cached/users/twitch/{}", channel.id));
+
+    // Fetch 7TV emotes
+    fetch_emotes("7tv", &format!("https://api.7tv.app/v2/users/{}/emotes", channel.id));
+
+    // Fetch FFZ emotes
+    fetch_emotes("ffz", &format!("https://api.frankerfacez.com/v1/room/{}", channel.name));
 
     emotes
 }

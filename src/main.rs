@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 mod auth;
 mod emotes;
-use crate::emotes::{get_emote_map, parse_message};
+use crate::emotes::{get_emote_map, parse_message, ChannelInfo};
 use crate::auth::create_auth_window;
 
 #[tokio::main]
@@ -127,7 +127,12 @@ fn build_ui(app: &Application) {
 
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(msg) = rx.try_recv() {
-            let emote_map = get_emote_map();
+            let channel = ChannelInfo {
+                name: msg.channel_login.clone(),
+                id: msg.channel_id.clone(),
+            };
+
+            let emote_map = get_emote_map(&channel);
 
             let row = parse_message(&msg, &emote_map);
 
