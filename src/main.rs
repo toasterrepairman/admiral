@@ -14,7 +14,7 @@ use std::collections::HashMap;
 mod auth;
 mod emotes;
 use crate::emotes::{get_emote_map, parse_message, ChannelInfo};
-use crate::auth::create_auth_window;
+use crate::auth::create_auth_dialog;
 
 #[tokio::main]
 async fn main() {
@@ -70,7 +70,7 @@ fn build_ui(app: &Application) {
     }));
 
     login_button.connect_clicked(clone!(@strong app => move |_| {
-        create_auth_window(&app);
+        create_auth_dialog(&app);
     }));
 
     let listbox = ListBox::builder()

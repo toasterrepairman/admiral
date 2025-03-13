@@ -1,6 +1,6 @@
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, HeaderBar};
-use gtk::{Box as GtkBox, Button, Entry, Label, Orientation};
+use adw::{Application, MessageDialog};
+use gtk::{Box as GtkBox, Button, Entry, Orientation};
 use keyring::Entry as KeyringEntry;
 use reqwest::Client;
 use std::sync::Arc;
@@ -10,77 +10,75 @@ use glib::MainContext;
 const CLIENT_ID: &str = "your_client_id";
 const REDIRECT_URI: &str = "http://localhost:8080";
 
-pub struct AuthWindow {
-    window: ApplicationWindow,
+pub struct AuthDialog {
+    dialog: MessageDialog,
     client: Arc<Client>,
     keyring: Arc<KeyringEntry>,
 }
 
-impl AuthWindow {
+impl AuthDialog {
     pub fn new(app: &Application) -> Self {
-        let window = ApplicationWindow::builder()
+        let dialog = MessageDialog::builder()
+            .modal(true)
+            .heading("Twitch Login")
+            .width_request(350)
+            .height_request(250)
             .application(app)
-            .title("Twitch Login")
-            .default_width(400)
-            .default_height(200)
             .build();
+
+        // Add dialog buttons
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("close", "Close");
+        dialog.set_default_response(Some("close"));
 
         let keyring = Arc::new(KeyringEntry::new("your_app_name", "twitch_token").unwrap());
         let client = Arc::new(Client::new());
 
         Self {
-            window,
+            dialog,
             client,
             keyring,
         }
     }
 
     pub fn build_ui(&self) {
-        // Create a header bar
-        let header = HeaderBar::builder()
-            .show_title(true)
-            .css_classes(["flat"])
-            .title_widget(&Label::new(Some("Twitch Login")))
+        // Main content box
+        let content_box = GtkBox::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(20)
+            .margin_top(20)
+            .margin_bottom(20)
+            .margin_start(20)
+            .margin_end(20)
             .build();
 
-        // Main content with padding
-        let content_box = GtkBox::new(Orientation::Vertical, 20);
+        // Login button
+        let login_button = Button::builder()
+            .label("Login with Twitch")
+            .css_classes(["suggested-action"])
+            .build();
 
-        let login_button = Button::with_label("Login");
-        login_button.set_margin_top(0);
-        login_button.set_margin_bottom(10);
-        login_button.set_margin_start(20);
-        login_button.set_margin_end(20);
+        // Token entry
+        let token_entry = Entry::builder()
+            .placeholder_text("Access Token")
+            .build();
 
-        let token_entry = Entry::new();
-        token_entry.set_placeholder_text(Some("Access Token"));
-        token_entry.set_margin_top(10);
-        token_entry.set_margin_bottom(10);
-        token_entry.set_margin_start(20);
-        token_entry.set_margin_end(20);
-
-        let save_button = Button::with_label("Save Token");
-        save_button.set_margin_top(10);
-        save_button.set_margin_bottom(20);
-        save_button.set_margin_start(20);
-        save_button.set_margin_end(20);
+        // Save button
+        let save_button = Button::builder()
+            .label("Save Token")
+            .css_classes(["suggested-action"])
+            .build();
 
         content_box.append(&login_button);
         content_box.append(&token_entry);
         content_box.append(&save_button);
 
-        // Create a root layout container
-        let root_box = GtkBox::new(Orientation::Vertical, 0);
-        root_box.append(&header);
-        root_box.append(&content_box);
+        self.dialog.set_extra_child(Some(&content_box));
 
-        // Set the root layout as the content
-        self.window.set_content(Some(&root_box));
-
-        // Clone necessary references for async callbacks
+        // Clone necessary references for callbacks
         let keyring = self.keyring.clone();
 
-        // Open Twitch login URL
+        // Handle login button click
         login_button.connect_clicked(move |_| {
             let auth_url = format!(
                 "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=chat:read+chat:edit",
@@ -91,7 +89,7 @@ impl AuthWindow {
             }
         });
 
-        // Save access token
+        // Handle save button click
         save_button.connect_clicked(move |_| {
             let token = token_entry.text().to_string();
             if !token.is_empty() {
@@ -105,16 +103,23 @@ impl AuthWindow {
                 });
             }
         });
+
+        // Handle dialog response
+        self.dialog.connect_response(None, |dialog, response| {
+            if response == "close" || response == "cancel" {
+                dialog.close();
+            }
+        });
     }
 
-    pub fn show(&self) {
-        self.window.present(); // Correct way to show the window in GTK4 + Libadwaita
+    pub fn present(&self) {
+        self.dialog.present();
     }
 }
 
-pub fn create_auth_window(app: &Application) {
-    println!("Creating Auth Window...");
-    let auth_window = AuthWindow::new(app);
-    auth_window.build_ui();
-    auth_window.show();
+pub fn create_auth_dialog(app: &Application) {
+    println!("Creating Auth Dialog...");
+    let auth_dialog = AuthDialog::new(app);
+    auth_dialog.build_ui();
+    auth_dialog.present();
 }
