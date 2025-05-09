@@ -11,7 +11,7 @@ Comment=Read Twitch chat in an accessible window
 Exec=admiral
 
 ## State the name of the icon that will be used to display this entry ##
-## Icon=icon-admiral
+Icon=icon-admiral
 
 ## Is it a terminal app? For example htop will be set as Terminal=True ##
 ## Then default terminal app will be used to open the 'htop' ##
