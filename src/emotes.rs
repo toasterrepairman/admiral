@@ -1,5 +1,8 @@
 use gtk::prelude::*;
 use gtk::{glib, gdk, gio, Box, Image, Label, Orientation, TextView, Widget, WrapMode};
+use gtk::gdk_pixbuf::PixbufAnimation;  // Add for GIF animation support
+use gtk::MediaFile;  // Add for video support
+use gtk::Video;  // Add this for GTK4 Video widget
 use twitch_irc::message::PrivmsgMessage;
 use chrono::Local;
 use twitch_irc::message::RGBColor;
@@ -13,6 +16,7 @@ pub struct Emote {
     name: String,
     url: String,
     local_path: String,
+    is_gif: bool,  // Add a field to track if the emote is a GIF
 }
 
 pub fn get_emote_map() -> HashMap<String, Emote> {
@@ -24,6 +28,7 @@ pub fn get_emote_map() -> HashMap<String, Emote> {
             name: "Kappa".to_string(),
             url: "https://example.com/kappa.png".to_string(),
             local_path: "~/.config/admiral/emotes/kappa.png".to_string(),
+            is_gif: false,
         },
     );
 
@@ -33,6 +38,17 @@ pub fn get_emote_map() -> HashMap<String, Emote> {
             name: "PogChamp".to_string(),
             url: "https://example.com/pogchamp.png".to_string(),
             local_path: "~/.config/admiral/emotes/pog.png".to_string(),
+            is_gif: false,
+        },
+    );
+
+    emotes.insert(
+        "iuh".to_string(),
+        Emote {
+            name: "iuh".to_string(),
+            url: "https://example.com/iuh.gif".to_string(),
+            local_path: "~/.config/admiral/emotes/iuh.gif".to_string(),
+            is_gif: true,  // Mark this as a GIF
         },
     );
 
@@ -72,11 +88,25 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     for word in msg.message_text.split_whitespace() {
         if let Some(emote) = emote_map.get(word) {
-            let file = gio::File::for_path(&shellexpand::tilde(&emote.local_path).to_string());
-            if let Ok(texture) = gdk::Texture::from_file(&file) {
-                let image = Image::from_paintable(Some(&texture));
-                image.set_pixel_size(24);
-                message_box.append(&image);
+            let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
+            let file = gio::File::for_path(&expanded_path);
+
+            if emote.is_gif {
+                // Create a video widget
+                let video = Video::builder()
+                    .loop_(true)
+                    .autoplay(true)
+                    .build();
+
+                video.set_file(Some(&file));
+                message_box.append(&video);
+            } else {
+                // For regular images, continue using the Image widget
+                if let Ok(texture) = gdk::Texture::from_file(&file) {
+                    let image = Image::from_paintable(Some(&texture));
+                    image.set_pixel_size(24);
+                    message_box.append(&image);
+                }
             }
         } else {
             let label = Label::new(Some(word));

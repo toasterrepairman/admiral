@@ -1,6 +1,8 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, ActionRow, Avatar};
 use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment, Image, Widget, MenuButton, Popover, Button as GtkButton};
+use gtk::Video;  // Add for Video widget
+use gtk::MediaFile;  // Add for MediaFile
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;

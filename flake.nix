@@ -46,6 +46,16 @@
         # cudaPackages.cuda_cccl
         # cudaPackages.libcublas
         # cudaPackages.setupCudaHook
+        # GStreamer dependencies - comprehensive set for media playback
+        gst_all_1.gstreamer
+        gst_all_1.gst-plugins-base
+        gst_all_1.gst-plugins-good
+        gst_all_1.gst-plugins-bad
+        gst_all_1.gst-plugins-ugly
+        gst_all_1.gst-libav  # For additional codecs
+
+        # Optional: Add GST debugging tools
+        gst_all_1.gst-devtools
       ];
 
       rustPlatform = pkgs.makeRustPlatform {
@@ -72,6 +82,18 @@
       defaultPackage = myRustBuild;
       devShell = pkgs.mkShell {
         nativeBuildInputs = packageDeps;
+        shellHook = ''
+            export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0:${pkgs.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0
+            export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0:${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0
+            export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0:${pkgs.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0
+            export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0:${pkgs.gst_all_1.gst-plugins-ugly}/lib/gstreamer-1.0
+            export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0:${pkgs.gst_all_1.gst-libav}/lib/gstreamer-1.0
+
+            # Set GStreamer debug level (optional)
+            # export GST_DEBUG=3
+
+            echo "GStreamer development environment ready"
+        '';
         # CUDA_ROOT = "${pkgs.cudaPackages.cudatoolkit}";
         buildInputs = [(rustVersion.override {extensions = ["rust-src"];})];
       };
