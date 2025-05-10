@@ -40,7 +40,7 @@ fn build_ui(app: &Application) {
         .build();
 
     let header = HeaderBar::builder()
-        .show_title(true)
+        .show_title(false)
         .css_classes(["flat"])
         .build();
 
@@ -64,7 +64,7 @@ fn build_ui(app: &Application) {
     let content = Box::new(Orientation::Vertical, 0);
 
     header.pack_start(&entry);
-    header.pack_end(&menu_button);
+    // header.pack_end(&menu_button);
 
     // connect entry to button press
     entry.connect_activate(clone!(@strong connect_button => move |_| {
