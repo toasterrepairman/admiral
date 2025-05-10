@@ -158,7 +158,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
                 // Display as a Picture without controls
                 let picture = gtk::Picture::new();
                 picture.set_paintable(Some(&media_file));
-                picture.set_size_request(24, 24);
+                picture.set_size_request(32, 32);
 
                 message_box.append(&picture);
             } else {
