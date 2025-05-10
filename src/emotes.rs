@@ -10,6 +10,7 @@ use std::fs;
 use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
 use reqwest::blocking::get;
 use std::sync::Mutex;
+use std::{path::{PathBuf}};
 
 #[derive(Debug, Clone)]
 pub struct Emote {
@@ -18,41 +19,96 @@ pub struct Emote {
     local_path: String,
     is_gif: bool,  // Add a field to track if the emote is a GIF
 }
-
-pub fn get_emote_map() -> HashMap<String, Emote> {
+/// Get emotes for a specific channel from the local filesystem
+///
+/// This function scans the channel-specific emote directory and builds
+/// a map of all available emotes. The directory structure is:
+/// ~/.config/admiral/emotes/{channel_id}/
+pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
     let mut emotes = HashMap::new();
 
-    emotes.insert(
-        "Kappa".to_string(),
-        Emote {
-            name: "Kappa".to_string(),
-            url: "https://example.com/kappa.png".to_string(),
-            local_path: "~/.config/admiral/emotes/kappa.png".to_string(),
-            is_gif: false,
-        },
-    );
+    // Build the path to the channel's emote directory
+    let base_path = shellexpand::tilde("~/.config/admiral/emotes").to_string();
+    let base_dir = Path::new(&base_path);
+    let channel_path = base_dir.join(channel_id);
 
-    emotes.insert(
-        "PogChamp".to_string(),
-        Emote {
-            name: "PogChamp".to_string(),
-            url: "https://example.com/pogchamp.png".to_string(),
-            local_path: "~/.config/admiral/emotes/pog.png".to_string(),
-            is_gif: false,
-        },
-    );
+    // Ensure both base and channel directories exist
+    if !base_dir.exists() {
+        println!("Base emotes directory doesn't exist, creating it now");
+        if let Err(e) = fs::create_dir_all(base_dir) {
+            eprintln!("Failed to create base emote directory: {}", e);
+            return emotes;
+        }
+    }
 
-    emotes.insert(
-        "iuh".to_string(),
-        Emote {
-            name: "iuh".to_string(),
-            url: "https://example.com/iuh.gif".to_string(),
-            local_path: "~/.config/admiral/emotes/iuh.gif".to_string(),
-            is_gif: true,  // Mark this as a GIF
+    // Ensure channel-specific directory exists
+    if !channel_path.exists() {
+        if let Err(e) = fs::create_dir_all(&channel_path) {
+            eprintln!("Failed to create emote directory for channel {}: {}", channel_id, e);
+            return emotes;
+        }
+    }
+
+    // Scan the directory for emote files
+    match fs::read_dir(&channel_path) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip directories
+                if path.is_dir() {
+                    continue;
+                }
+
+                if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
+                    let is_gif = path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_lowercase() == "gif")
+                        .unwrap_or(false);
+
+                    // Create the emote entry
+                    let emote = Emote {
+                        name: file_name.to_string(),
+                        url: String::new(), // Empty URL as we're loading from filesystem
+                        local_path: path.to_string_lossy().to_string(),
+                        is_gif,
+                    };
+
+                    emotes.insert(file_name.to_string(), emote);
+                }
+            }
         },
-    );
+        Err(e) => {
+            eprintln!("Failed to read emote directory for channel {}: {}", channel_id, e);
+        }
+    }
+
+    // Future: Add code to check for missing common emotes and download them
+    // fetch_missing_emotes(channel_id, &mut emotes).await;
 
     emotes
+}
+
+// Placeholder for future implementation
+// This would download missing emotes from 7TV API
+async fn fetch_missing_emotes(channel_id: &str, emotes: &mut HashMap<String, Emote>) {
+    // TODO:
+    // 1. Query 7TV API for channel emotes
+    // 2. Compare with local emotes
+    // 3. Download any missing emotes
+    // 4. Add them to the HashMap
+}
+
+// Helper function to determine if a file is an image/gif
+fn is_image_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        match ext.to_lowercase().as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" => true,
+            _ => false,
+        }
+    } else {
+        false
+    }
 }
 
 /// Converts an `RGBColor` to a CSS hex string like "#RRGGBB"

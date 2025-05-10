@@ -129,7 +129,8 @@ fn build_ui(app: &Application) {
 
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(msg) = rx.try_recv() {
-            let emote_map = get_emote_map();
+            let channelid = &msg.channel_id;
+            let emote_map = get_emote_map(&channelid);
 
             let row = parse_message(&msg, &emote_map);
 
