@@ -92,14 +92,19 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             let file = gio::File::for_path(&expanded_path);
 
             if emote.is_gif {
-                // Create a video widget
-                let video = Video::builder()
-                    .loop_(true)
-                    .autoplay(true)
-                    .build();
+                // Load the gif using MediaFile
+                let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
+                let media_file = gtk::MediaFile::for_filename(&expanded_path);
 
-                video.set_file(Some(&file));
-                message_box.append(&video);
+                media_file.play();
+                media_file.set_loop(true);
+
+                // Display as a Picture without controls
+                let picture = gtk::Picture::new();
+                picture.set_paintable(Some(&media_file));
+                picture.set_size_request(24, 24);
+
+                message_box.append(&picture);
             } else {
                 // For regular images, continue using the Image widget
                 if let Ok(texture) = gdk::Texture::from_file(&file) {
