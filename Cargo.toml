@@ -6,6 +6,12 @@ edition = "2021"
 [toolchain]
 channel = "nightly"
 
+[profile.release]
+opt-level = 3      # Optimization level (0-3, 's', 'z')
+# lto = "thin"       # Link-time optimization ("off", "thin", "fat")
+# codegen-units = 1  # Number of code generation units (smaller is often better for LTO)
+strip = "symbols"  # Strip symbols from the binary ("none", "symbols", "debuginfo")
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

@@ -12,7 +12,7 @@ use std::fs;
 use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
 use reqwest::blocking::{get, Client, Response};
 use std::sync::{Mutex, RwLock, mpsc};
-use std::{path::{PathBuf}, thread, time::Duration};
+use std::{path::{PathBuf}, thread, time::Duration, collections::HashSet};
 use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
@@ -191,23 +191,10 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
 
     let response = client.get(&twitch_lookup_url).send()?;
     if !response.status().is_success() {
-        eprintln!("Failed to fetch user data from 7TV for channel {}: HTTP {}", channel_id, response.status());
-        // It might be useful to print response.text() here for debugging if it's not too large
-        // return Err(Box::new(response.error_for_status().unwrap_err())); // Or a custom error
         return Err(format!("7TV API request failed with status {}", response.status()).into());
     }
 
-    // Attempt to deserialize the response
-    let user_response: SevenTVUserResponse = match response.json() {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("Failed to deserialize 7TV user response for channel {}: {:?}", channel_id, e);
-            // Optionally, you could try to get the text of the response here for logging,
-            // but since response.json() consumes it, you'd have to read it as text first then attempt json.
-            return Err(Box::new(e));
-        }
-    };
-
+    let user_response: SevenTVUserResponse = response.json()?;
 
     let api_emote_set = match user_response.emote_set {
         Some(set) => set,
@@ -224,14 +211,23 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         fs::create_dir_all(&channel_path)?;
     }
 
+    let mut existing_emotes: HashSet<String> = HashSet::new();
+    if let Ok(entries) = fs::read_dir(&channel_path) {
+        for entry in entries.flatten() {
+            if let Some(file_name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                existing_emotes.insert(file_name.to_string());
+            }
+        }
+    }
+
     for active_emote in api_emote_set.emotes {
-        // 1. Check if 'data' field exists
         if let Some(emote_data) = &active_emote.data {
-            // 2. Check if 'host' field exists within 'data'
             if let Some(host_info) = &emote_data.host {
-                // 3. Check if the host URL is not empty
                 if host_info.url.trim().is_empty() {
-                    eprintln!("Emote {} (ID: {}) has host data, but the host URL is empty. Skipping.", active_emote.name, active_emote.id);
+                    eprintln!(
+                        "Emote {} (ID: {}) has host data, but the host URL is empty. Skipping.",
+                        active_emote.name, active_emote.id
+                    );
                     continue;
                 }
 
@@ -239,22 +235,25 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
 
                 if let Some(file_to_download) = file_opt {
                     let file_extension = file_to_download.format.to_lowercase();
+                    let local_file_name = format!("{}", active_emote.name); // Use name without extension for checking
 
-                    // Construct the full emote URL
-                    // 7TV CDN URLs are typically like: https://cdn.7tv.app/emote/{EMOTE_ID}/{FILE_NAME_FROM_HOST_FILES}
-                    // The host_info.url might be "//cdn.7tv.app/emote/EMOTE_ID" or "cdn.7tv.app/emote/EMOTE_ID"
-                    // We need to ensure it becomes a valid https URL.
-                    let base_emote_url = host_info.url.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("//");
-                    let emote_url = format!("https://{}/{}", base_emote_url, file_to_download.name);
-
-                    let local_path = channel_path.join(format!("{}.{}", active_emote.name, file_extension));
-
-                    if local_path.exists() {
-                        // println!("Emote {} already exists locally. Skipping download.", active_emote.name);
+                    // Efficiently check if the emote already exists
+                    if existing_emotes.contains(&local_file_name) {
                         continue;
                     }
 
-                    println!("Downloading emote {} (URL: {}) for channel {}", active_emote.name, emote_url, channel_id);
+                    let base_emote_url = host_info
+                        .url
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_start_matches("//");
+                    let emote_url = format!("https://{}/{}", base_emote_url, file_to_download.name);
+                    let local_path = channel_path.join(format!("{}.{}", active_emote.name, file_extension));
+
+                    println!(
+                        "Downloading emote {} (URL: {}) for channel {}",
+                        active_emote.name, emote_url, channel_id
+                    );
 
                     let download_result = (|| -> Result<(), Box<dyn StdError + Send + Sync>> {
                         let response = client.get(&emote_url).send()?;
@@ -264,7 +263,10 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                             file_handle.write_all(&bytes)?;
                             println!("Successfully downloaded emote {} to {:?}", active_emote.name, local_path);
                         } else {
-                            eprintln!("Failed to download emote image {} from {}: HTTP {}", active_emote.name, emote_url, response.status());
+                            eprintln!(
+                                "Failed to download emote image {} from {}: HTTP {}",
+                                active_emote.name, emote_url, response.status()
+                            );
                         }
                         Ok(())
                     })();
@@ -275,15 +277,22 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
 
                     thread::sleep(Duration::from_millis(100)); // Rate limiting
                 } else {
-                    eprintln!("No suitable image file found by find_best_image_file for emote {} (ID: {}) in channel {}. Files available: {:?}", active_emote.name, active_emote.id, channel_id, host_info.files);
+                    eprintln!(
+                        "No suitable image file found by find_best_image_file for emote {} (ID: {}) in channel {}. Files available: {:?}",
+                        active_emote.name, active_emote.id, channel_id, host_info.files
+                    );
                 }
             } else {
-                // 'host' is None or missing within 'data'
-                eprintln!("Emote {} (ID: {}) has a 'data' object, but is missing 'host' information. Skipping.", active_emote.name, active_emote.id);
+                eprintln!(
+                    "Emote {} (ID: {}) has a 'data' object, but is missing 'host' information. Skipping.",
+                    active_emote.name, active_emote.id
+                );
             }
         } else {
-            // 'data' is None or missing
-            eprintln!("Emote {} (ID: {}) is missing the 'data' field which contains host information. Skipping.", active_emote.name, active_emote.id);
+            eprintln!(
+                "Emote {} (ID: {}) is missing the 'data' field which contains host information. Skipping.",
+                active_emote.name, active_emote.id
+            );
         }
     }
 
