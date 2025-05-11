@@ -82,8 +82,24 @@ struct ImageFile { // Corresponds to the file objects within ImageHost.files
     // flags: u32, // from spec, EmoteFileFlagModel
 }
 
-// (Keep your DOWNLOADING_CHANNELS, get_emote_map, fetch_missing_emotes, find_best_image_file, is_image_file, rgb_to_hex, parse_message as they were,
-//  unless find_best_image_file needs tweaks based on new format knowledge, but its current logic is likely fine)
+// MediaResource for tracking and cleaning up resources
+struct MediaResource {
+    media_file: MediaFile,
+}
+
+impl Drop for MediaResource {
+    fn drop(&mut self) {
+        // Make sure media playback is stopped and resources released
+        self.media_file.pause();
+        self.media_file.set_loop(false);
+        self.media_file.clear();
+        self.media_file.set_resource(None);
+        self.media_file.stream_ended();
+    }
+}
+
+// Continue with your existing functions
+// ...
 
 /// Get emotes for a specific channel from the local filesystem
 /// and synchronize with 7TV if needed
@@ -392,12 +408,12 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
 /// Find the best image file for an emote
 fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
     // Prefer files in this order: 3x WebP, 3x GIF, 3x PNG
-    // Start with PNG 3x
+    // Start with PNG 1x
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "PNG") {
         return Some(file);
     }
 
-    // Then GIF 3x
+    // Then GIF 1x
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "GIF") {
         return Some(file);
     }
@@ -449,35 +465,32 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     let message_box = GtkBox::new(Orientation::Horizontal, 3);
 
-    // Store MediaFile objects so we can stop them on destroy
-    let media_files: std::cell::RefCell<Vec<gtk::MediaFile>> = std::cell::RefCell::new(Vec::new());
+    // new struct for better tracking and automatic cleanup
+    let media_resources = Arc::new(Mutex::new(Vec::<MediaResource>::new()));
 
     for word in msg.message_text.split_whitespace() {
         if let Some(emote) = emote_map.get(word) {
             let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
-            let file = gio::File::for_path(&expanded_path);
 
+            // Create a MediaFile for the emote
+            let media_file = MediaFile::for_filename(&expanded_path);
+
+            // Create Picture widget for display
+            let picture = gtk::Picture::new();
+            picture.set_paintable(Some(&media_file));
+            picture.set_size_request(-1, 32);
+
+            // Start playback for animated files
             if emote.is_gif {
-                let media_file = gtk::MediaFile::for_filename(&expanded_path);
                 media_file.play();
                 media_file.set_loop(true);
-                media_files.borrow_mut().push(media_file.clone()); // Store a clone
-
-                let picture = gtk::Picture::new();
-                picture.set_paintable(Some(&media_file));
-                picture.set_size_request(-1, 32);
-                message_box.append(&picture);
-            } else {
-                if let Ok(texture) = gdk::Texture::from_file(&file) {
-                    let media_file = gtk::MediaFile::for_filename(&expanded_path);
-                    media_files.borrow_mut().push(media_file.clone()); // Store a clone
-
-                    let picture = gtk::Picture::new();
-                    picture.set_paintable(Some(&media_file));
-                    picture.set_size_request(-1, 32);
-                    message_box.append(&picture);
-                }
             }
+
+            // Add the media file to our tracked resources
+            let resource = MediaResource { media_file };
+            media_resources.lock().unwrap().push(resource);
+
+            message_box.append(&picture);
         } else {
             let label = Label::new(Some(word));
             message_box.append(&label);
@@ -487,16 +500,14 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.append(&message_box);
     container.prepend(&sender_label);
 
-    // Attach a destroy signal handler to the top-level container
-    let media_files_clone = media_files.clone();
-    container.connect_destroy(move |_| {
-        println!("Destroy signal received for a message widget. Stopping media.");
-        for media in media_files_clone.borrow_mut().iter() {
-            media.pause(); // Call stop() directly on the MediaFile
-            media.clear(); // Call stop() directly on the MediaFile
-        }
-        media_files_clone.borrow_mut().clear(); // Clear the stored MediaFile references
-    });
+    // Attach a destroy signal handler to ensure proper cleanup
+    let media_resources_clone = media_resources.clone();
+    container.connect_destroy(glib::clone!(@strong media_resources_clone => move |_| {
+        // The media_resources_clone will be dropped here when this scope ends,
+        // which triggers the Drop implementation for each MediaResource
+        println!("Cleaning up {} media resources", media_resources_clone.lock().unwrap().len());
+        media_resources_clone.lock().unwrap().clear();
+    }));
 
     container.upcast::<Widget>()
 }
