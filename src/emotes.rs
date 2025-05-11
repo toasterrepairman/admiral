@@ -424,7 +424,6 @@ fn rgb_to_hex(color: &RGBColor) -> String {
 }
 
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
-    // Sender's name with color
     let sender_label = Label::new(Some(&msg.sender.name));
     sender_label.set_xalign(0.0);
 
@@ -434,7 +433,8 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             "<span foreground=\"{}\"><b>{}</b></span> - <i>{}</i>",
             color_hex,
             glib::markup_escape_text(&msg.sender.name),
-            &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()));
+            &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()
+        ));
     } else {
         sender_label.set_markup(&format!("<b>{}</b> - <i>{}</i>",
             &msg.sender.name,
@@ -446,8 +446,11 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.set_margin_bottom(4);
     container.set_margin_start(6);
     container.set_margin_end(6);
-    // Message row (single line of text + emotes)
+
     let message_box = GtkBox::new(Orientation::Horizontal, 3);
+
+    // Store MediaFile objects so we can stop them on destroy
+    let media_files: std::cell::RefCell<Vec<gtk::MediaFile>> = std::cell::RefCell::new(Vec::new());
 
     for word in msg.message_text.split_whitespace() {
         if let Some(emote) = emote_map.get(word) {
@@ -455,25 +458,24 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             let file = gio::File::for_path(&expanded_path);
 
             if emote.is_gif {
-                // Load the gif using MediaFile
-                let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
                 let media_file = gtk::MediaFile::for_filename(&expanded_path);
-
                 media_file.play();
                 media_file.set_loop(true);
+                media_files.borrow_mut().push(media_file.clone()); // Store a clone
 
-                // Display as a Picture without controls
                 let picture = gtk::Picture::new();
                 picture.set_paintable(Some(&media_file));
                 picture.set_size_request(-1, 32);
-
                 message_box.append(&picture);
             } else {
-                // For regular images, continue using the Image widget
                 if let Ok(texture) = gdk::Texture::from_file(&file) {
-                    let image = Image::from_paintable(Some(&texture));
-                    image.set_pixel_size(24);
-                    message_box.append(&image);
+                    let media_file = gtk::MediaFile::for_filename(&expanded_path);
+                    media_files.borrow_mut().push(media_file.clone()); // Store a clone
+
+                    let picture = gtk::Picture::new();
+                    picture.set_paintable(Some(&media_file));
+                    picture.set_size_request(-1, 32);
+                    message_box.append(&picture);
                 }
             }
         } else {
@@ -484,5 +486,17 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     container.append(&message_box);
     container.prepend(&sender_label);
+
+    // Attach a destroy signal handler to the top-level container
+    let media_files_clone = media_files.clone();
+    container.connect_destroy(move |_| {
+        println!("Destroy signal received for a message widget. Stopping media.");
+        for media in media_files_clone.borrow_mut().iter() {
+            media.pause(); // Call stop() directly on the MediaFile
+            media.clear(); // Call stop() directly on the MediaFile
+        }
+        media_files_clone.borrow_mut().clear(); // Clear the stored MediaFile references
+    });
+
     container.upcast::<Widget>()
 }
