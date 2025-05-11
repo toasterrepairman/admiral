@@ -21,7 +21,7 @@ use crate::auth::create_auth_window;
 #[tokio::main]
 async fn main() {
     let app = Application::builder()
-        .application_id("com.toaster.Admiral")
+        .application_id("Admiral")
         .build();
 
     app.connect_activate(build_ui);
