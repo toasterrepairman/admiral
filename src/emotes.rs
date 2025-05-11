@@ -1,6 +1,5 @@
 use gtk::prelude::*;
 use gtk::{glib, gdk, gio, Image, Label, Orientation, TextView, Widget, WrapMode};
-// Import Box as GtkBox to avoid conflicts with std::boxed::Box
 use gtk::Box as GtkBox;
 use gtk::gdk_pixbuf::PixbufAnimation;
 use gtk::MediaFile;
@@ -9,16 +8,19 @@ use twitch_irc::message::PrivmsgMessage;
 use chrono::Local;
 use twitch_irc::message::RGBColor;
 use std::fs;
-use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc, time::{Duration, Instant},};
 use reqwest::blocking::{get, Client, Response};
 use std::sync::{Mutex, RwLock, mpsc};
-use std::{path::{PathBuf}, thread, time::Duration, collections::HashSet};
+use std::{path::{PathBuf}, thread, collections::HashSet};
 use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
 
 // Tracking which channels are currently being processed
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+
+// Tracking the last time we fetched emotes for a channel
+static LAST_FETCH_TIME: Lazy<RwLock<HashMap<String, Instant>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 // Your existing Emote struct for local representation
 #[derive(Debug, Clone)]
@@ -154,33 +156,120 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
     emotes
 }
 
-fn fetch_missing_emotes(channel_id: &str) -> thread::JoinHandle<()> {
-    let channel_id = channel_id.to_string();
+const FETCH_COOLDOWN: Duration = Duration::from_secs(60 * 10); // 10 minutes
 
-    // Check if download is already in progress for this channel
+fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
+    let channel_id = channel_id.to_string();
+    let now = Instant::now();
+
+    // Check if download is already in progress
     {
         let downloading = DOWNLOADING_CHANNELS.read().unwrap();
         if downloading.get(&channel_id).copied().unwrap_or(false) {
-            // Download already in progress, no need to start again
-            return thread::spawn(|| {}); // Return a dummy JoinHandle that does nothing
+            return None;
         }
     }
 
-    // Mark channel as being processed
+    // Check the last fetch time
     {
-        let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
-        downloading.insert(channel_id.clone(), true);
+        let last_fetch_read = LAST_FETCH_TIME.read().unwrap();
+        if let Some(&last_fetch) = last_fetch_read.get(&channel_id) {
+            if now.duration_since(last_fetch) < FETCH_COOLDOWN {
+                return None; // Cooldown not yet elapsed
+            }
+        }
     }
 
-    // Start a new thread for downloading and return the join handle
-    thread::spawn(move || {
-        if let Err(e) = download_channel_emotes(&channel_id) {
-            eprintln!("Failed to download emotes for channel {}: {:?}", channel_id, e);
-        }
+    let base_path = shellexpand::tilde("~/.config/admiral/emotes").to_string();
+    let channel_path = Path::new(&base_path).join(&channel_id);
+    let mut existing_emotes: HashSet<String> = HashSet::new();
 
-        let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
-        downloading.insert(channel_id.clone(), false);
-    }) // No semicolon here so the JoinHandle is returned
+    if channel_path.exists() {
+        if let Ok(entries) = fs::read_dir(&channel_path) {
+            for entry in entries.flatten() {
+                if let Some(file_name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                    existing_emotes.insert(file_name.to_string());
+                }
+            }
+        }
+    }
+
+    // Fetch the list of remote emote names from 7TV
+    match get_remote_emote_names(&channel_id) {
+        Ok(remote_emote_names) => {
+            let missing_emotes: Vec<String> = remote_emote_names
+                .iter()
+                .filter(|name| !existing_emotes.contains(*name))
+                .cloned()
+                .collect();
+
+            // Update the last fetch time regardless of whether there were missing emotes
+            let mut last_fetch_write = LAST_FETCH_TIME.write().unwrap();
+            last_fetch_write.insert(channel_id.clone(), now);
+
+            if !missing_emotes.is_empty() {
+                // Mark channel as being processed
+                {
+                    let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
+                    downloading.insert(channel_id.clone(), true);
+                }
+
+                // Start a new thread for downloading and return the join handle
+                Some(thread::spawn(move || {
+                    println!(
+                        "Detected {} missing emotes for channel {}, starting download (cooldown: {:?})...",
+                        missing_emotes.len(),
+                        channel_id,
+                        FETCH_COOLDOWN
+                    );
+                    if let Err(e) = download_channel_emotes(&channel_id) {
+                        eprintln!("Failed to download emotes for channel {}: {:?}", channel_id, e);
+                    }
+
+                    let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
+                    downloading.insert(channel_id.clone(), false);
+                }))
+            } else {
+                println!("No missing emotes detected for channel {} (cooldown: {:?}).", channel_id, FETCH_COOLDOWN);
+                None
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to fetch remote emote list for channel {}: {:?}", channel_id, e);
+            // Still update the last fetch time on error to avoid retrying too quickly
+            let mut last_fetch_write = LAST_FETCH_TIME.write().unwrap();
+            last_fetch_write.insert(channel_id.clone(), now);
+            None
+        }
+    }
+}
+
+// Helper function to fetch the list of emote names from the 7TV API
+fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn StdError + Send + Sync>> {
+    let client = Client::new();
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
+    let mut emote_names = HashSet::new();
+
+    let response = client.get(&twitch_lookup_url).send()?;
+    if !response.status().is_success() {
+        return Err(format!("7TV API request failed with status {}", response.status()).into());
+    }
+
+    let user_response: Result<SevenTVUserResponse, reqwest::Error> = response.json();
+    match user_response {
+        Ok(user_data) => {
+            if let Some(emote_set) = user_data.emote_set {
+                for active_emote in emote_set.emotes {
+                    emote_names.insert(active_emote.name);
+                }
+            }
+        }
+        Err(e) => {
+            return Err(format!("Failed to parse 7TV API response: {}", e).into());
+        }
+    }
+
+    Ok(emote_names)
 }
 
 fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {

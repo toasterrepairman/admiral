@@ -140,6 +140,7 @@ fn build_ui(app: &Application) {
             while list.first_child().is_some() && list.row_at_index(100).is_some() {
                 if let Some(child) = list.last_child() {
                     if let Some(row) = child.downcast_ref::<ListBoxRow>() {
+                        row.unrealize();
                         list.remove(row);
                     } else {
                         eprintln!("Warning: Encountered non-ListBoxRow widget in ListBox!");
@@ -161,4 +162,11 @@ fn build_ui(app: &Application) {
     app.set_accels_for_action("win.quit", &["<Control>q"]);
 
     window.present();
+}
+
+fn recursively_remove_children(container: &Box) {
+    if let Some(child) = container.first_child() {
+        container.remove(&child);
+        recursively_remove_children(container);
+    }
 }
