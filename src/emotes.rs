@@ -502,7 +502,6 @@ fn rgb_to_hex(color: &RGBColor) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
 }
 
-
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
     let container = GtkBox::new(Orientation::Vertical, 2);
     container.set_margin_top(4);
@@ -511,7 +510,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.set_margin_end(8);
     container.add_css_class("message-box");
 
-    // Header row
+    // Header row with sender and timestamp
     let header_box = GtkBox::new(Orientation::Horizontal, 0);
     header_box.set_hexpand(true);
 
@@ -527,11 +526,17 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             glib::markup_escape_text(&msg.sender.name)
         ));
     } else {
-        sender_label.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&msg.sender.name)));
+        sender_label.set_markup(&format!(
+            "<b>{}</b>",
+            glib::markup_escape_text(&msg.sender.name)
+        ));
     }
 
     let timestamp = Label::new(Some(
-        &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string(),
+        &msg.server_timestamp
+            .with_timezone(&Local)
+            .format("%-I:%M:%S %p")
+            .to_string(),
     ));
     timestamp.add_css_class("dim-label");
     timestamp.set_xalign(1.0);
@@ -539,15 +544,13 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     header_box.append(&sender_label);
     header_box.append(&timestamp);
 
-    // Message content area
+    // Message content box
     let message_box = GtkBox::new(Orientation::Horizontal, 2);
     message_box.set_hexpand(true);
     message_box.set_valign(gtk::Align::Start);
     message_box.set_halign(gtk::Align::Start);
 
     let resource_manager = Arc::new(Mutex::new(MediaResourceManager::new()));
-
-    // Tokenize message
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
 
@@ -555,7 +558,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         let word = cap.as_str();
 
         if let Some(emote) = emote_map.get(word.trim()) {
-            // Flush current buffer of text before inserting emote
+            // Flush text buffer before emote
             if !buffer.is_empty() {
                 let label = Label::new(Some(&buffer));
                 label.set_wrap(true);
@@ -565,7 +568,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
                 buffer.clear();
             }
 
-            // Insert emote widget
             let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
             let mut manager = resource_manager.lock().unwrap();
 
@@ -603,6 +605,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
+    // Style
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         "
@@ -626,13 +629,15 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         );
     }
 
+    // Cleanup on destroy
     let resource_manager_clone = resource_manager.clone();
     row.connect_destroy(move |_| {
-        let mut manager = resource_manager_clone.lock().unwrap();
-        for resource in &mut manager.resources {
-            resource.cleanup();
+        if let Ok(mut manager) = resource_manager_clone.lock() {
+            for resource in &mut manager.resources {
+                resource.cleanup();
+            }
+            manager.resources.clear();
         }
-        manager.resources.clear();
     });
 
     row.upcast::<Widget>()
