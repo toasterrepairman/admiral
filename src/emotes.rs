@@ -82,21 +82,38 @@ struct ImageFile { // Corresponds to the file objects within ImageHost.files
     // flags: u32, // from spec, EmoteFileFlagModel
 }
 
-// MediaResource for tracking and cleaning up resources
 struct MediaResource {
-    media_file: MediaFile,
+    media_file: gtk::MediaFile,
+    picture: gtk::Picture, // Store the picture to manage its paintable
 }
 
 impl Drop for MediaResource {
     fn drop(&mut self) {
-        // Make sure media playback is stopped and resources released
+        if let Some(path) = self.media_file.file().and_then(|f| f.path()) {
+            println!("Dropping MediaResource for: {:?}", path);
+        } else {
+            println!("Dropping MediaResource (file path not available)");
+        }
+
+        // 1. Stop any playback immediately
         self.media_file.pause();
         self.media_file.set_loop(false);
-        self.media_file.clear();
+
+        // 2. Disconnect the Picture from the MediaFile.
+        // This is a critical step. It signals to GTK and potentially GStreamer
+        // that the rendering surface is no longer needed for this media.
+        self.picture.set_paintable(None::<&gtk::MediaFile>);
+
+        // 3. Explicitly tell the MediaFile to release its underlying GStreamer resources.
+        // set_resource(None) is the more modern and correct way to do this,
+        // replacing older methods like clear().
         self.media_file.set_resource(None);
-        self.media_file.stream_ended();
+
+        // self.media_file.clear(); // Deprecated, avoid.
+        // self.media_file.stream_ended(); // Generally not needed if set_resource(None) is used.
     }
 }
+
 
 // Continue with your existing functions
 // ...
@@ -472,25 +489,30 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         if let Some(emote) = emote_map.get(word) {
             let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
 
-            // Create a MediaFile for the emote
-            let media_file = MediaFile::for_filename(&expanded_path);
+            if emote.is_gif { // Only use MediaFile for GIFs
+                let media_file = gtk::MediaFile::for_filename(&expanded_path);
+                let picture = gtk::Picture::new(); // Create the Picture widget
 
-            // Create Picture widget for display
-            let picture = gtk::Picture::new();
-            picture.set_paintable(Some(&media_file));
-            picture.set_size_request(-1, 32);
+                // Set the picture to display the media file
+                picture.set_paintable(Some(&media_file));
+                picture.set_size_request(-1, 32); // Or your desired emote height
 
-            // Start playback for animated files
-            if emote.is_gif {
                 media_file.play();
                 media_file.set_loop(true);
+
+                // Store both the media_file and the picture in MediaResource
+                // picture.clone() is a cheap reference clone
+                let resource = MediaResource { media_file, picture: picture.clone() };
+                media_resources.lock().unwrap().push(resource);
+
+                message_box.append(&picture); // Append the original picture to the UI
+            } else {
+                // For static images, gtk::Image is simpler and less resource-intensive
+                let image = gtk::Image::from_file(&expanded_path);
+                // You might want to set a consistent size for static images too
+                image.set_pixel_size(32); // Example
+                message_box.append(&image);
             }
-
-            // Add the media file to our tracked resources
-            let resource = MediaResource { media_file };
-            media_resources.lock().unwrap().push(resource);
-
-            message_box.append(&picture);
         } else {
             let label = Label::new(Some(word));
             message_box.append(&label);
@@ -500,14 +522,16 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.append(&message_box);
     container.prepend(&sender_label);
 
-    // Attach a destroy signal handler to ensure proper cleanup
+    // The connect_destroy logic remains largely the same:
     let media_resources_clone = media_resources.clone();
-    container.connect_destroy(glib::clone!(@strong media_resources_clone => move |_| {
-        // The media_resources_clone will be dropped here when this scope ends,
-        // which triggers the Drop implementation for each MediaResource
-        println!("Cleaning up {} media resources", media_resources_clone.lock().unwrap().len());
+    container.connect_destroy(move |_widget| {
+        let count = media_resources_clone.lock().unwrap().len();
+        if count > 0 {
+            println!("Container destroyed, cleaning up {} media resources.", count);
+        }
+        // Clearing the Vec will trigger Drop for each MediaResource
         media_resources_clone.lock().unwrap().clear();
-    }));
+    });
 
     container.upcast::<Widget>()
 }
