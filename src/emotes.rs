@@ -172,7 +172,7 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
     emotes
 }
 
-const FETCH_COOLDOWN: Duration = Duration::from_secs(60 * 10); // 10 minutes
+const FETCH_COOLDOWN: Duration = Duration::from_secs(60 * 1); // 1 minute
 
 fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
     let channel_id = channel_id.to_string();
