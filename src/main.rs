@@ -99,6 +99,8 @@ fn build_ui(app: &Application) {
         // Kill any existing task
         if let Some(handle) = active_task.lock().unwrap().take() {
             handle.abort();
+            // Explicitly drop the JoinHandle
+            drop(handle);
         }
 
         message_list.lock().unwrap().remove_all();

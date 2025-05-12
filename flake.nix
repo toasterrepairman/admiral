@@ -88,7 +88,7 @@
             export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0:${pkgs.gst_all_1.gst-libav}/lib/gstreamer-1.0
 
             # Set GStreamer debug level (optional)
-            # export GST_DEBUG=3
+            # export GST_DEBUG=3,GstPipeline:4,GstMemory:5,GstPoll:5 RUST_BACKTRACE=1 your_application_binary
 
             echo "GStreamer development environment ready"
         '';

@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use gtk::{glib, gdk, gio, Image, Label, Orientation, TextView, Widget, WrapMode};
+use gtk::{glib, gdk, gio, Image, Label, Orientation, TextView, Widget, WrapMode, ListBoxRow};
 use gtk::Box as GtkBox;
 use gtk::gdk_pixbuf::PixbufAnimation;
 use gtk::MediaFile;
@@ -518,20 +518,30 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             message_box.append(&label);
         }
     }
-
     container.append(&message_box);
     container.prepend(&sender_label);
 
-    // The connect_destroy logic remains largely the same:
+    // Clone Arc for the destroy handler
     let media_resources_clone = media_resources.clone();
     container.connect_destroy(move |_widget| {
         let count = media_resources_clone.lock().unwrap().len();
         if count > 0 {
             println!("Container destroyed, cleaning up {} media resources.", count);
         }
-        // Clearing the Vec will trigger Drop for each MediaResource
         media_resources_clone.lock().unwrap().clear();
     });
 
-    container.upcast::<Widget>()
+    // Add a destroy handler to the ListBoxRow itself to ensure cleanup
+    let row = ListBoxRow::new();
+    row.set_child(Some(&container));
+    let media_resources_clone_for_row = media_resources.clone();
+    row.connect_destroy(move |_row| {
+        let count = media_resources_clone_for_row.lock().unwrap().len();
+        if count > 0 {
+            println!("ListBoxRow destroyed, explicitly cleaning up {} media resources.", count);
+        }
+        media_resources_clone_for_row.lock().unwrap().clear();
+    });
+
+    row.upcast::<Widget>()
 }
