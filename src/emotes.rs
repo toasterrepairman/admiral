@@ -15,6 +15,8 @@ use std::{path::{PathBuf}, thread, collections::HashSet};
 use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use once_cell::sync::Lazy;
+use regex::Regex;
+use gtk::FlowBox;
 
 // Tracking which channels are currently being processed
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| RwLock::new(HashMap::new()));
@@ -82,38 +84,82 @@ struct ImageFile { // Corresponds to the file objects within ImageHost.files
     // flags: u32, // from spec, EmoteFileFlagModel
 }
 
-struct MediaResource {
-    media_file: gtk::MediaFile,
-    picture: gtk::Picture, // Store the picture to manage its paintable
+struct MediaResourceManager {
+    resources: Vec<Box<dyn MediaResource>>,
 }
 
-impl Drop for MediaResource {
-    fn drop(&mut self) {
-        if let Some(path) = self.media_file.file().and_then(|f| f.path()) {
-            println!("Dropping MediaResource for: {:?}", path);
-        } else {
-            println!("Dropping MediaResource (file path not available)");
-        }
+impl MediaResourceManager {
+    fn new() -> Self {
+        Self { resources: Vec::new() }
+    }
 
-        // 1. Stop any playback immediately
-        self.media_file.pause();
-        self.media_file.set_loop(false);
-
-        // 2. Disconnect the Picture from the MediaFile.
-        // This is a critical step. It signals to GTK and potentially GStreamer
-        // that the rendering surface is no longer needed for this media.
-        self.picture.set_paintable(None::<&gtk::MediaFile>);
-
-        // 3. Explicitly tell the MediaFile to release its underlying GStreamer resources.
-        // set_resource(None) is the more modern and correct way to do this,
-        // replacing older methods like clear().
-        self.media_file.set_resource(None);
-
-        // self.media_file.clear(); // Deprecated, avoid.
-        // self.media_file.stream_ended(); // Generally not needed if set_resource(None) is used.
+    fn add_resource<T: MediaResource + 'static>(&mut self, resource: T) {
+        self.resources.push(Box::new(resource));
     }
 }
 
+// Define a trait for media resources to ensure proper cleanup
+trait MediaResource {
+    fn get_widget(&self) -> Widget;
+    fn cleanup(&mut self);
+}
+
+// Implementation for GIF animations using MediaFile
+struct GifMediaResource {
+    media_file: gtk::MediaFile,
+    picture: gtk::Picture,
+}
+
+impl GifMediaResource {
+    fn new(path: &str) -> Self {
+        let media_file = gtk::MediaFile::for_filename(path);
+        let picture = gtk::Picture::new();
+
+        picture.set_paintable(Some(&media_file));
+        picture.set_size_request(-1, 28); // Consistent size for all emotes
+
+        media_file.play();
+        media_file.set_loop(true);
+
+        Self { media_file, picture }
+    }
+}
+
+impl MediaResource for GifMediaResource {
+    fn get_widget(&self) -> Widget {
+        self.picture.clone().upcast::<Widget>()
+    }
+
+    fn cleanup(&mut self) {
+        self.media_file.pause();
+        self.media_file.set_loop(false);
+        self.picture.set_paintable(None::<&gtk::MediaFile>);
+        self.media_file.set_resource(None);
+    }
+}
+
+// Implementation for static images
+struct StaticImageResource {
+    image: gtk::Image,
+}
+
+impl StaticImageResource {
+    fn new(path: &str) -> Self {
+        let image = gtk::Image::from_file(path);
+        image.set_pixel_size(28); // Consistent size for all emotes
+        Self { image }
+    }
+}
+
+impl MediaResource for StaticImageResource {
+    fn get_widget(&self) -> Widget {
+        self.image.clone().upcast::<Widget>()
+    }
+
+    fn cleanup(&mut self) {
+        // Static images don't need special cleanup beyond what GTK handles
+    }
+}
 
 // Continue with your existing functions
 // ...
@@ -456,91 +502,137 @@ fn rgb_to_hex(color: &RGBColor) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
 }
 
+
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
-    let sender_label = Label::new(Some(&msg.sender.name));
+    let container = GtkBox::new(Orientation::Vertical, 2);
+    container.set_margin_top(4);
+    container.set_margin_bottom(4);
+    container.set_margin_start(8);
+    container.set_margin_end(8);
+    container.add_css_class("message-box");
+
+    // Header row
+    let header_box = GtkBox::new(Orientation::Horizontal, 0);
+    header_box.set_hexpand(true);
+
+    let sender_label = Label::new(None);
     sender_label.set_xalign(0.0);
+    sender_label.set_hexpand(true);
 
     if let Some(color) = &msg.name_color {
         let color_hex = rgb_to_hex(color);
         sender_label.set_markup(&format!(
-            "<span foreground=\"{}\"><b>{}</b></span> - <i>{}</i>",
+            "<span foreground=\"{}\"><b>{}</b></span>",
             color_hex,
-            glib::markup_escape_text(&msg.sender.name),
-            &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string()
+            glib::markup_escape_text(&msg.sender.name)
         ));
     } else {
-        sender_label.set_markup(&format!("<b>{}</b> - <i>{}</i>",
-            &msg.sender.name,
-            &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p")));
+        sender_label.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&msg.sender.name)));
     }
 
-    let container = GtkBox::new(Orientation::Vertical, 0);
-    container.set_margin_top(4);
-    container.set_margin_bottom(4);
-    container.set_margin_start(6);
-    container.set_margin_end(6);
+    let timestamp = Label::new(Some(
+        &msg.server_timestamp.with_timezone(&Local).format("%-I:%M:%S %p").to_string(),
+    ));
+    timestamp.add_css_class("dim-label");
+    timestamp.set_xalign(1.0);
 
-    let message_box = GtkBox::new(Orientation::Horizontal, 3);
+    header_box.append(&sender_label);
+    header_box.append(&timestamp);
 
-    // new struct for better tracking and automatic cleanup
-    let media_resources = Arc::new(Mutex::new(Vec::<MediaResource>::new()));
+    // Message content area
+    let message_box = GtkBox::new(Orientation::Horizontal, 2);
+    message_box.set_hexpand(true);
+    message_box.set_valign(gtk::Align::Start);
+    message_box.set_halign(gtk::Align::Start);
 
-    for word in msg.message_text.split_whitespace() {
-        if let Some(emote) = emote_map.get(word) {
-            let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
+    let resource_manager = Arc::new(Mutex::new(MediaResourceManager::new()));
 
-            if emote.is_gif { // Only use MediaFile for GIFs
-                let media_file = gtk::MediaFile::for_filename(&expanded_path);
-                let picture = gtk::Picture::new(); // Create the Picture widget
+    // Tokenize message
+    let re = Regex::new(r"(\s+|\S+)").unwrap();
+    let mut buffer = String::new();
 
-                // Set the picture to display the media file
-                picture.set_paintable(Some(&media_file));
-                picture.set_size_request(-1, 32); // Or your desired emote height
+    for cap in re.find_iter(&msg.message_text) {
+        let word = cap.as_str();
 
-                media_file.play();
-                media_file.set_loop(true);
-
-                // Store both the media_file and the picture in MediaResource
-                // picture.clone() is a cheap reference clone
-                let resource = MediaResource { media_file, picture: picture.clone() };
-                media_resources.lock().unwrap().push(resource);
-
-                message_box.append(&picture); // Append the original picture to the UI
-            } else {
-                // For static images, gtk::Image is simpler and less resource-intensive
-                let image = gtk::Image::from_file(&expanded_path);
-                // You might want to set a consistent size for static images too
-                image.set_pixel_size(32); // Example
-                message_box.append(&image);
+        if let Some(emote) = emote_map.get(word.trim()) {
+            // Flush current buffer of text before inserting emote
+            if !buffer.is_empty() {
+                let label = Label::new(Some(&buffer));
+                label.set_wrap(true);
+                label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                label.set_xalign(0.0);
+                message_box.append(&label);
+                buffer.clear();
             }
+
+            // Insert emote widget
+            let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
+            let mut manager = resource_manager.lock().unwrap();
+
+            let widget = if emote.is_gif {
+                let resource = GifMediaResource::new(&expanded_path);
+                let widget = resource.get_widget();
+                manager.add_resource(resource);
+                widget
+            } else {
+                let resource = StaticImageResource::new(&expanded_path);
+                let widget = resource.get_widget();
+                manager.add_resource(resource);
+                widget
+            };
+
+            message_box.append(&widget);
         } else {
-            let label = Label::new(Some(word));
-            message_box.append(&label);
+            buffer.push_str(word);
         }
     }
+
+    // Flush any remaining text
+    if !buffer.is_empty() {
+        let label = Label::new(Some(&buffer));
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_xalign(0.0);
+        message_box.append(&label);
+    }
+
+    container.append(&header_box);
     container.append(&message_box);
-    container.prepend(&sender_label);
 
-    // Clone Arc for the destroy handler
-    let media_resources_clone = media_resources.clone();
-    container.connect_destroy(move |_widget| {
-        let count = media_resources_clone.lock().unwrap().len();
-        if count > 0 {
-            println!("Container destroyed, cleaning up {} media resources.", count);
-        }
-        media_resources_clone.lock().unwrap().clear();
-    });
-
-    // Add a destroy handler to the ListBoxRow itself to ensure cleanup
     let row = ListBoxRow::new();
     row.set_child(Some(&container));
-    let media_resources_clone_for_row = media_resources.clone();
-    row.connect_destroy(move |_row| {
-        let count = media_resources_clone_for_row.lock().unwrap().len();
-        if count > 0 {
-            println!("ListBoxRow destroyed, explicitly cleaning up {} media resources.", count);
+    row.add_css_class("message-row");
+
+    let css_provider = gtk::CssProvider::new();
+    css_provider.load_from_data(
+        "
+        .message-box {
+            border: 1px solid alpha(#999, 0.3);
+            border-radius: 8px;
+            padding: 8px;
+            background-color: alpha(#fff, 0.02);
         }
-        media_resources_clone_for_row.lock().unwrap().clear();
+        .message-row {
+            background-color: transparent;
+        }
+        ",
+    );
+
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    let resource_manager_clone = resource_manager.clone();
+    row.connect_destroy(move |_| {
+        let mut manager = resource_manager_clone.lock().unwrap();
+        for resource in &mut manager.resources {
+            resource.cleanup();
+        }
+        manager.resources.clear();
     });
 
     row.upcast::<Widget>()

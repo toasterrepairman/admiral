@@ -101,6 +101,8 @@ fn build_ui(app: &Application) {
             handle.abort();
             // Explicitly drop the JoinHandle
             drop(handle);
+        } else {
+
         }
 
         message_list.lock().unwrap().remove_all();
@@ -139,7 +141,7 @@ fn build_ui(app: &Application) {
             let mut list = message_list.lock().unwrap();
             list.prepend(&row);
 
-            while list.first_child().is_some() && list.row_at_index(100).is_some() {
+            while list.first_child().is_some() && list.row_at_index(25).is_some() {
                 if let Some(child) = list.last_child() {
                     if let Some(row) = child.downcast_ref::<ListBoxRow>() {
                         // row.unrealize();
