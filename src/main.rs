@@ -101,11 +101,13 @@ fn build_ui(app: &Application) {
             handle.abort();
             // Explicitly drop the JoinHandle
             drop(handle);
-        } else {
-
         }
 
-        message_list.lock().unwrap().remove_all();
+        // Clear existing messages to free resources
+        let mut list = message_list.lock().unwrap();
+        list.remove_all();
+        drop(list);  // Explicitly release the lock
+
         let channel = entry.text().to_string();
         let tx = tx.clone();
         let message_list = message_list.clone();
@@ -134,26 +136,36 @@ fn build_ui(app: &Application) {
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(msg) = rx.try_recv() {
             let channelid = &msg.channel_id;
-        let emote_map = get_emote_map(&channelid);
+            let emote_map = get_emote_map(&channelid);
 
             let row = parse_message(&msg, &emote_map);
 
             let mut list = message_list.lock().unwrap();
             list.prepend(&row);
 
-            while list.first_child().is_some() && list.row_at_index(25).is_some() {
-                if let Some(child) = list.last_child() {
-                    if let Some(row) = child.downcast_ref::<ListBoxRow>() {
-                        // row.unrealize();
-                        list.remove(row);
-                    } else {
-                        eprintln!("Warning: Encountered non-ListBoxRow widget in ListBox!");
+            // More aggressively clean up old messages to prevent resource leak
+            let max_messages = 20;  // Reduced from 25 to release more resources
+
+            // Use a safer approach for removing rows that won't cause segfaults
+            let row_count = list.observe_children().n_items();
+
+            // Only attempt cleanup if we have too many messages
+            if row_count > max_messages as u32 {
+                // Find excess rows to remove (keep max_messages)
+                let rows_to_remove = (row_count as i32) - max_messages;
+
+                // Remove the oldest messages
+                for _ in 0..rows_to_remove {
+                    if let Some(last_row) = list.last_child() {
+                        // Simply remove from container - GTK will handle cleanup
+                        list.remove(&last_row);
                     }
                 }
             }
         }
         glib::ControlFlow::Continue
     });
+
 
     window.set_content(Some(&content));
 
