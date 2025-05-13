@@ -1,22 +1,19 @@
+
 use gtk::prelude::*;
-use gtk::{glib, gdk, gio, Image, Label, Orientation, TextView, Widget, WrapMode, ListBoxRow};
+use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow};
 use gtk::Box as GtkBox;
-use gtk::gdk_pixbuf::PixbufAnimation;
-use gtk::MediaFile;
-use gtk::Video;
 use twitch_irc::message::PrivmsgMessage;
 use chrono::Local;
 use twitch_irc::message::RGBColor;
 use std::fs;
 use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc, time::{Duration, Instant},};
-use reqwest::blocking::{get, Client, Response};
+use reqwest::blocking::{Client, Response};
 use std::sync::{Mutex, RwLock, mpsc};
 use std::{path::{PathBuf}, thread, collections::HashSet};
 use std::error::Error as StdError;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use gtk::FlowBox;
 
 // Tracking which channels are currently being processed
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| RwLock::new(HashMap::new()));
@@ -36,66 +33,39 @@ pub struct Emote {
 // --- Updated 7TV API Response Structures ---
 
 #[derive(Debug, Deserialize)]
-struct SevenTVUserResponse { // Represents the top-level object from /v3/users/twitch/{id}
-    // Based on the spec, the path to the active emote set for a user (e.g., a Twitch channel)
-    // is often through user.connections[platform="twitch"].emote_set
-    // Or, if you are fetching a specific emote set by ID, this structure might be simpler.
-    // For now, assuming your existing UserResponse somehow gets to the EmoteSetModel:
-    emote_set: Option<ApiEmoteSet>, // This should map to EmoteSetModel
+struct SevenTVUserResponse {
+    emote_set: Option<ApiEmoteSet>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiEmoteSet { // Corresponds to EmoteSetModel in the 7TV API spec
+struct ApiEmoteSet {
     id: String,
     name: String,
-    emotes: Vec<ApiActiveEmote>, // List of ActiveEmoteModel
-    // Add other fields from EmoteSetModel if needed (e.g., flags, capacity)
+    emotes: Vec<ApiActiveEmote>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiActiveEmote { // Corresponds to ActiveEmoteModel
+struct ApiActiveEmote {
     id: String,
-    name: String,        // Name of the emote
-    data: Option<ApiEmoteData>, // This is the nested part containing host info
-    // Add other fields from ActiveEmoteModel if needed (e.g., flags, timestamp)
+    name: String,
+    data: Option<ApiEmoteData>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiEmoteData { // Corresponds to EmotePartialModel
-    // animated: bool, // You can add this if you want to know from API if it's animated
-    host: Option<ImageHost>, // The host field is inside data
-    // You can also include other fields from EmotePartialModel like 'name', 'id' if they differ or are useful
+struct ApiEmoteData {
+    host: Option<ImageHost>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct ImageHost { // Corresponds to ImageHost in the 7TV API spec
-    url: String,           // Base URL for the emote, e.g., "//cdn.7tv.app/emote/EMOTE_ID"
-    files: Vec<ImageFile>, // Available image files
+struct ImageHost {
+    url: String,
+    files: Vec<ImageFile>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct ImageFile { // Corresponds to the file objects within ImageHost.files
-    name: String,        // Actual file name, e.g., "1x.webp", "animated.gif", "3x.png"
-    // static_name: Option<String>, // The spec shows this, useful if you want to specifically target static versions.
-    format: String,      // File format, e.g., "WEBP", "PNG", "GIF", "AVIF" (spec focuses on AVIF/WEBP but API might send others)
-    width: u32,
-    height: u32,
-    // size: u32, // from spec
-    // flags: u32, // from spec, EmoteFileFlagModel
-}
-
-struct MediaResourceManager {
-    resources: Vec<Box<dyn MediaResource>>,
-}
-
-impl MediaResourceManager {
-    fn new() -> Self {
-        Self { resources: Vec::new() }
-    }
-
-    fn add_resource<T: MediaResource + 'static>(&mut self, resource: T) {
-        self.resources.push(Box::new(resource));
-    }
+struct ImageFile {
+    name: String,
+    format: String,
 }
 
 // Define a trait for media resources to ensure proper cleanup
@@ -162,33 +132,13 @@ impl MediaResource for StaticImageResource {
     }
 }
 
-// Continue with your existing functions
-// ...
-
 /// Get emotes for a specific channel from the local filesystem
 /// and synchronize with 7TV if needed
-///
-/// This function scans the channel-specific emote directory and builds
-/// a map of all available emotes. The directory structure is:
-/// ~/.config/admiral/emotes/{channel_id}/
 pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
     let mut emotes = HashMap::new();
-
-    // Build the path to the channel's emote directory
     let base_path = shellexpand::tilde("~/.config/admiral/emotes").to_string();
-    let base_dir = Path::new(&base_path);
-    let channel_path = base_dir.join(channel_id);
+    let channel_path = Path::new(&base_path).join(channel_id);
 
-    // Ensure both base and channel directories exist
-    if !base_dir.exists() {
-        println!("Base emotes directory doesn't exist, creating it now");
-        if let Err(e) = fs::create_dir_all(base_dir) {
-            eprintln!("Failed to create base emote directory: {}", e);
-            return emotes;
-        }
-    }
-
-    // Ensure channel-specific directory exists
     if !channel_path.exists() {
         if let Err(e) = fs::create_dir_all(&channel_path) {
             eprintln!("Failed to create emote directory for channel {}: {}", channel_id, e);
@@ -196,46 +146,23 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
         }
     }
 
-    // Use a bounded scope for the directory reading to ensure file handles are closed
-    {
-        // Scan the directory for emote files
-        match fs::read_dir(&channel_path) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-
-                    // Skip directories
-                    if path.is_dir() {
-                        continue;
-                    }
-
-                    if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                        let is_gif = path.extension()
-                            .and_then(|ext| ext.to_str())
-                            .map(|ext| ext.to_lowercase() == "gif")
-                            .unwrap_or(false);
-
-                        // Create the emote entry
-                        let emote = Emote {
-                            name: file_name.to_string(),
-                            url: String::new(), // Empty URL as we're loading from filesystem
-                            local_path: path.to_string_lossy().to_string(),
-                            is_gif,
-                        };
-
-                        emotes.insert(file_name.to_string(), emote);
-                    }
-                }
-            },
-            Err(e) => {
-                eprintln!("Failed to read emote directory for channel {}: {}", channel_id, e);
+    if let Ok(entries) = fs::read_dir(&channel_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
+                let is_gif = path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_lowercase() == "gif").unwrap_or(false);
+                let emote = Emote {
+                    name: file_name.to_string(),
+                    url: String::new(),
+                    local_path: path.to_string_lossy().to_string(),
+                    is_gif,
+                };
+                emotes.insert(file_name.to_string(), emote);
             }
         }
-    } // Directory handle is closed here
+    }
 
-    // Start a background task to fetch missing emotes from 7TV if not already running
     fetch_missing_emotes(channel_id);
-
     emotes
 }
 
@@ -245,7 +172,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
     let channel_id = channel_id.to_string();
     let now = Instant::now();
 
-    // Check if download is already in progress
     {
         let downloading = DOWNLOADING_CHANNELS.read().unwrap();
         if downloading.get(&channel_id).copied().unwrap_or(false) {
@@ -253,7 +179,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
         }
     }
 
-    // Check the last fetch time
     {
         let last_fetch_read = LAST_FETCH_TIME.read().unwrap();
         if let Some(&last_fetch) = last_fetch_read.get(&channel_id) {
@@ -277,7 +202,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
         }
     }
 
-    // Fetch the list of remote emote names from 7TV
     match get_remote_emote_names(&channel_id) {
         Ok(remote_emote_names) => {
             let missing_emotes: Vec<String> = remote_emote_names
@@ -286,18 +210,15 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
                 .cloned()
                 .collect();
 
-            // Update the last fetch time regardless of whether there were missing emotes
             let mut last_fetch_write = LAST_FETCH_TIME.write().unwrap();
             last_fetch_write.insert(channel_id.clone(), now);
 
             if !missing_emotes.is_empty() {
-                // Mark channel as being processed
                 {
                     let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
                     downloading.insert(channel_id.clone(), true);
                 }
 
-                // Start a new thread for downloading and return the join handle
                 Some(thread::spawn(move || {
                     println!(
                         "Detected {} missing emotes for channel {}, starting download (cooldown: {:?})...",
@@ -319,7 +240,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
         }
         Err(e) => {
             eprintln!("Failed to fetch remote emote list for channel {}: {:?}", channel_id, e);
-            // Still update the last fetch time on error to avoid retrying too quickly
             let mut last_fetch_write = LAST_FETCH_TIME.write().unwrap();
             last_fetch_write.insert(channel_id.clone(), now);
             None
@@ -327,7 +247,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
     }
 }
 
-// Helper function to fetch the list of emote names from the 7TV API
 fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn StdError + Send + Sync>> {
     let client = Client::new();
     let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
@@ -354,14 +273,11 @@ fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn S
 
     Ok(emote_names)
 }
-
 fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
     println!("Fetching emotes for channel {} from 7TV", channel_id);
 
     let client = Client::new();
     let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
-
-    // Limit the number of emotes to download in a single batch
     const MAX_EMOTES_PER_BATCH: usize = 50;
 
     let response = client.get(&twitch_lookup_url).send()?;
@@ -386,25 +302,19 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         fs::create_dir_all(&channel_path)?;
     }
 
-    // Read existing emotes
     let mut existing_emotes: HashSet<String> = HashSet::new();
-    {
-        // Limit scope to ensure file descriptor is closed
-        if let Ok(entries) = fs::read_dir(&channel_path) {
-            for entry in entries.flatten() {
-                if let Some(file_name) = entry.path().file_stem().and_then(|s| s.to_str()) {
-                    existing_emotes.insert(file_name.to_string());
-                }
+    if let Ok(entries) = fs::read_dir(&channel_path) {
+        for entry in entries.flatten() {
+            if let Some(file_name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                existing_emotes.insert(file_name.to_string());
             }
         }
     }
 
-    // Process emotes in batches to limit open file descriptors
-    let mut emotes_to_process: Vec<_> = api_emote_set.emotes.into_iter()
+    let emotes_to_process: Vec<_> = api_emote_set.emotes.into_iter()
         .filter(|e| !existing_emotes.contains(&e.name))
         .collect();
 
-    // Process in smaller batches
     for batch in emotes_to_process.chunks(MAX_EMOTES_PER_BATCH) {
         for active_emote in batch {
             if let Some(emote_data) = &active_emote.data {
@@ -435,10 +345,9 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                             if response.status().is_success() {
                                 let bytes = response.bytes()?;
                                 {
-                                    // Explicitly limit scope of file handle
                                     let mut file_handle = File::create(&local_path)?;
                                     file_handle.write_all(&bytes)?;
-                                } // File handle closed here
+                                }
                                 println!("Successfully downloaded emote {} to {:?}", active_emote.name, local_path);
                             } else {
                                 eprintln!(
@@ -453,14 +362,11 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                             eprintln!("Error processing download for emote {}: {:?}", active_emote.name, e);
                         }
 
-                        // Sleep between downloads to prevent overwhelming resources
                         thread::sleep(Duration::from_millis(100));
                     }
                 }
             }
         }
-
-        // Add a pause between batches to allow file descriptors to be fully released
         thread::sleep(Duration::from_millis(500));
     }
 
@@ -471,30 +377,26 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
 /// Find the best image file for an emote
 fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
     // Prefer files in this order: 3x WebP, 3x GIF, 3x PNG
-    // Start with PNG 1x
-    if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "PNG") {
+    if let Some(file) = files.iter().find(|f| f.name.contains("3x") && f.format == "WEBP") {
         return Some(file);
     }
-
-    // Then GIF 1x
+    if let Some(file) = files.iter().find(|f| f.name.contains("3x") && f.format == "GIF") {
+        return Some(file);
+    }
+    if let Some(file) = files.iter().find(|f| f.name.contains("3x") && f.format == "PNG") {
+        return Some(file);
+    }
+    // Fallback to 1x if 3x not available
+    if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "WEBP") {
+        return Some(file);
+    }
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "GIF") {
         return Some(file);
     }
-
-    // If nothing specific found, just return the first file
-    files.first()
-}
-
-/// Helper function to determine if a file is an image/gif
-fn is_image_file(path: &Path) -> bool {
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        match ext.to_lowercase().as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "webp" => true,
-            _ => false,
-        }
-    } else {
-        false
+    if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "PNG") {
+        return Some(file);
     }
+    files.first()
 }
 
 /// Converts an `RGBColor` to a CSS hex string like "#RRGGBB"
@@ -510,7 +412,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.set_margin_end(8);
     container.add_css_class("message-box");
 
-    // Header row with sender and timestamp
     let header_box = GtkBox::new(Orientation::Horizontal, 0);
     header_box.set_hexpand(true);
 
@@ -544,13 +445,11 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     header_box.append(&sender_label);
     header_box.append(&timestamp);
 
-    // Message content box
     let message_box = GtkBox::new(Orientation::Horizontal, 2);
     message_box.set_hexpand(true);
     message_box.set_valign(gtk::Align::Start);
     message_box.set_halign(gtk::Align::Start);
 
-    // Use Rc instead of Arc since we're in a single-threaded GTK context
     let resource_manager = Arc::new(Mutex::new(MediaResourceManager::new()));
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
@@ -559,7 +458,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         let word = cap.as_str();
 
         if let Some(emote) = emote_map.get(word.trim()) {
-            // Flush text buffer before emote
             if !buffer.is_empty() {
                 let label = Label::new(Some(&buffer));
                 label.set_wrap(true);
@@ -572,9 +470,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
             let mut manager = resource_manager.lock().unwrap();
 
-            // Check if file actually exists before creating resource
             if !std::path::Path::new(&expanded_path).exists() {
-                // Skip this emote if file doesn't exist
                 continue;
             }
 
@@ -596,7 +492,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         }
     }
 
-    // Flush any remaining text
     if !buffer.is_empty() {
         let label = Label::new(Some(&buffer));
         label.set_wrap(true);
@@ -612,7 +507,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
-    // Style
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         "
@@ -625,6 +519,10 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         .message-row {
             background-color: transparent;
         }
+        .dim-label {
+            color: alpha(#888, 0.8);
+            font-size: 0.8em;
+        }
         ",
     );
 
@@ -636,7 +534,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         );
     }
 
-    // Ensure cleanup on destroy
     let resource_manager_clone = resource_manager.clone();
     row.connect_destroy(move |_| {
         if let Ok(mut manager) = resource_manager_clone.try_lock() {
@@ -648,4 +545,18 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     });
 
     row.upcast::<Widget>()
+}
+
+struct MediaResourceManager {
+    resources: Vec<Box<dyn MediaResource>>,
+}
+
+impl MediaResourceManager {
+    fn new() -> Self {
+        Self { resources: Vec::new() }
+    }
+
+    fn add_resource<T: MediaResource + 'static>(&mut self, resource: T) {
+        self.resources.push(Box::new(resource));
+    }
 }

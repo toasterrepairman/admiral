@@ -1,15 +1,13 @@
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, HeaderBar, ActionRow, Avatar};
-use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button, Orientation, Box, Align, Adjustment, Image, Widget, MenuButton, Popover, Button as GtkButton};
-use gtk::Video;  // Add for Video widget
-use gtk::MediaFile;  // Add for MediaFile
+use adw::{Application, ApplicationWindow, HeaderBar};
+use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button as GtkButton, Orientation, Box, Align, Widget, MenuButton, Popover};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
 use tokio::sync::mpsc;
 use tokio::task;
 use glib::clone;
-use chrono::{TimeZone, NaiveDateTime, Utc, Local};
+use chrono::Local;
 use gio::SimpleAction;
 use std::collections::HashMap;
 
@@ -29,9 +27,6 @@ async fn main() {
 }
 
 fn build_ui(app: &Application) {
-    //////////////////////
-    // Main application //
-    //////////////////////
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Admiral")
@@ -49,8 +44,8 @@ fn build_ui(app: &Application) {
     let login_button = GtkButton::builder().label("Log In").build();
 
     let popover_box = Box::new(Orientation::Vertical, 5);
-        popover_box.append(&connect_button);
-        popover_box.append(&login_button);
+    popover_box.append(&connect_button);
+    popover_box.append(&login_button);
 
     let popover = Popover::builder()
         .child(&popover_box)
@@ -60,13 +55,11 @@ fn build_ui(app: &Application) {
         .popover(&popover)
         .build();
 
-    // Combine the content in a box
     let content = Box::new(Orientation::Vertical, 0);
 
     header.pack_start(&entry);
-    // header.pack_end(&menu_button);
+    header.pack_end(&menu_button);
 
-    // connect entry to button press
     entry.connect_activate(clone!(@strong connect_button => move |_| {
         connect_button.emit_clicked();
     }));
@@ -85,28 +78,21 @@ fn build_ui(app: &Application) {
         .child(&listbox)
         .build();
 
-    // composite window content
     content.append(&header);
     content.append(&scrolled_window);
 
-    // message list channel
     let message_list = Arc::new(Mutex::new(listbox.clone()));
     let (tx, mut rx) = mpsc::channel(100);
-    // task handler
     let active_task: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     connect_button.connect_clicked(clone!(@strong message_list, @strong active_task => move |_| {
-        // Kill any existing task
+        // Abort any existing task
         if let Some(handle) = active_task.lock().unwrap().take() {
             handle.abort();
-            // Explicitly drop the JoinHandle
-            drop(handle);
         }
 
-        // Clear existing messages to free resources
-        let mut list = message_list.lock().unwrap();
-        list.remove_all();
-        drop(list);  // Explicitly release the lock
+        // Clear existing messages
+        message_list.lock().unwrap().remove_all();
 
         let channel = entry.text().to_string();
         let tx = tx.clone();
@@ -137,35 +123,21 @@ fn build_ui(app: &Application) {
         while let Ok(msg) = rx.try_recv() {
             let channelid = &msg.channel_id;
             let emote_map = get_emote_map(&channelid);
-
             let row = parse_message(&msg, &emote_map);
-
             let mut list = message_list.lock().unwrap();
             list.prepend(&row);
 
-            // More aggressively clean up old messages to prevent resource leak
-            let max_messages = 20;  // Reduced from 25 to release more resources
-
-            // Use a safer approach for removing rows that won't cause segfaults
+            // Limit the number of displayed messages
+            let max_messages = 20;
             let row_count = list.observe_children().n_items();
-
-            // Only attempt cleanup if we have too many messages
             if row_count > max_messages as u32 {
-                // Find excess rows to remove (keep max_messages)
-                let rows_to_remove = (row_count as i32) - max_messages;
-
-                // Remove the oldest messages
-                for _ in 0..rows_to_remove {
-                    if let Some(last_row) = list.last_child() {
-                        // Simply remove from container - GTK will handle cleanup
-                        list.remove(&last_row);
-                    }
+                if let Some(last_row) = list.last_child() {
+                    list.remove(&last_row);
                 }
             }
         }
         glib::ControlFlow::Continue
     });
-
 
     window.set_content(Some(&content));
 
@@ -178,11 +150,4 @@ fn build_ui(app: &Application) {
     app.set_accels_for_action("win.quit", &["<Control>q"]);
 
     window.present();
-}
-
-fn recursively_remove_children(container: &Box) {
-    if let Some(child) = container.first_child() {
-        container.remove(&child);
-        recursively_remove_children(container);
-    }
 }
