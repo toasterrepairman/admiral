@@ -612,6 +612,30 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
+    // Style
+    let css_provider = gtk::CssProvider::new();
+    css_provider.load_from_data(
+        "
+        .message-box {
+            border: 1px solid alpha(#999, 0.3);
+            border-radius: 8px;
+            padding: 8px;
+            background-color: alpha(#fff, 0.02);
+        }
+        .message-row {
+            background-color: transparent;
+        }
+        ",
+    );
+
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
     // Ensure cleanup on destroy
     let resource_manager_clone = resource_manager.clone();
     row.connect_destroy(move |_| {
