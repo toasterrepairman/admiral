@@ -273,12 +273,21 @@ fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn S
 
     Ok(emote_names)
 }
+
 fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
     println!("Fetching emotes for channel {} from 7TV", channel_id);
 
     let client = Client::new();
     let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
+
+    // Batch size for processing emotes - helps manage file handles
     const MAX_EMOTES_PER_BATCH: usize = 50;
+    // Rate limit for API calls - helps avoid 429 errors
+    const BATCH_DELAY_MS: u64 = 500;
+    // Small delay between individual downloads within a batch
+    const DOWNLOAD_DELAY_MS: u64 = 100;
+    // Maximum number of retries for failed downloads
+    const MAX_RETRIES: usize = 3;
 
     let response = client.get(&twitch_lookup_url).send()?;
     if !response.status().is_success() {
@@ -302,6 +311,7 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         fs::create_dir_all(&channel_path)?;
     }
 
+    // Load existing emotes to prevent redownloading
     let mut existing_emotes: HashSet<String> = HashSet::new();
     if let Ok(entries) = fs::read_dir(&channel_path) {
         for entry in entries.flatten() {
@@ -311,12 +321,29 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         }
     }
 
+    // Count total and new emotes
+    let total_emotes = api_emote_set.emotes.len();
     let emotes_to_process: Vec<_> = api_emote_set.emotes.into_iter()
         .filter(|e| !existing_emotes.contains(&e.name))
         .collect();
+    let new_emotes = emotes_to_process.len();
 
-    for batch in emotes_to_process.chunks(MAX_EMOTES_PER_BATCH) {
-        for active_emote in batch {
+    println!(
+        "Channel {} has {} total emotes. Found {} new emotes to download.",
+        channel_id, total_emotes, new_emotes
+    );
+
+    // Process emotes in fixed-size batches to manage file handles
+    let batch_count = (new_emotes + MAX_EMOTES_PER_BATCH - 1) / MAX_EMOTES_PER_BATCH;
+    for (batch_idx, batch) in emotes_to_process.chunks(MAX_EMOTES_PER_BATCH).enumerate() {
+        println!(
+            "Processing batch {}/{} ({} emotes)",
+            batch_idx + 1,
+            batch_count,
+            batch.len()
+        );
+
+        for (emote_idx, active_emote) in batch.iter().enumerate() {
             if let Some(emote_data) = &active_emote.data {
                 if let Some(host_info) = &emote_data.host {
                     if host_info.url.trim().is_empty() {
@@ -336,57 +363,81 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                         let local_path = channel_path.join(format!("{}.{}", active_emote.name, file_extension));
 
                         println!(
-                            "Downloading emote {} (URL: {}) for channel {}",
-                            active_emote.name, emote_url, channel_id
+                            "Downloading emote {}/{}: {} (URL: {})",
+                            emote_idx + 1, batch.len(), active_emote.name, emote_url
                         );
 
-                        let download_result = (|| -> Result<(), Box<dyn StdError + Send + Sync>> {
-                            let response = client.get(&emote_url).send()?;
-                            if response.status().is_success() {
-                                let bytes = response.bytes()?;
-                                {
-                                    let mut file_handle = File::create(&local_path)?;
-                                    file_handle.write_all(&bytes)?;
-                                }
-                                println!("Successfully downloaded emote {} to {:?}", active_emote.name, local_path);
-                            } else {
-                                eprintln!(
-                                    "Failed to download emote image {} from {}: HTTP {}",
-                                    active_emote.name, emote_url, response.status()
-                                );
-                            }
-                            Ok(())
-                        })();
+                        // Try downloading with retries
+                        let mut success = false;
+                        for retry in 1..=MAX_RETRIES {
+                            let download_result = (|| -> Result<(), Box<dyn StdError + Send + Sync>> {
+                                let response = client.get(&emote_url).send()?;
 
-                        if let Err(e) = download_result {
-                            eprintln!("Error processing download for emote {}: {:?}", active_emote.name, e);
+                                if response.status().is_success() {
+                                    let bytes = response.bytes()?;
+
+                                    // Write file with explicit scope to ensure handle is closed
+                                    {
+                                        let mut file_handle = File::create(&local_path)?;
+                                        file_handle.write_all(&bytes)?;
+                                        // File handle is closed when it goes out of scope
+                                    }
+
+                                    println!("Successfully downloaded emote {} to {:?}", active_emote.name, local_path);
+                                    success = true;
+                                } else if response.status().as_u16() == 429 {
+                                    // Rate limited, wait longer
+                                    println!("Rate limited (429) when downloading {}. Retrying after delay...", active_emote.name);
+                                    thread::sleep(Duration::from_millis(DOWNLOAD_DELAY_MS * 5));
+                                } else {
+                                    return Err(format!(
+                                        "Failed to download emote image {} from {}: HTTP {}",
+                                        active_emote.name, emote_url, response.status()
+                                    ).into());
+                                }
+
+                                Ok(())
+                            })();
+
+                            if let Err(e) = download_result {
+                                eprintln!("Error processing download for emote {} (attempt {}/{}): {:?}",
+                                          active_emote.name, retry, MAX_RETRIES, e);
+
+                                if retry == MAX_RETRIES {
+                                    // Last attempt failed, let's clean up any partial download
+                                    if local_path.exists() {
+                                        let _ = fs::remove_file(&local_path);
+                                    }
+                                }
+
+                                // Wait before retrying
+                                thread::sleep(Duration::from_millis(DOWNLOAD_DELAY_MS * retry as u64));
+                            } else if success {
+                                break; // Successfully downloaded, no need to retry
+                            }
                         }
 
-                        thread::sleep(Duration::from_millis(100));
+                        // Small delay between downloads to avoid overwhelming the server
+                        thread::sleep(Duration::from_millis(DOWNLOAD_DELAY_MS));
                     }
                 }
             }
         }
-        thread::sleep(Duration::from_millis(500));
+
+        // Delay between batches to avoid rate limiting
+        if batch_idx < batch_count - 1 {
+            println!("Finished batch {}/{}. Waiting before next batch...", batch_idx + 1, batch_count);
+            thread::sleep(Duration::from_millis(BATCH_DELAY_MS));
+        }
     }
 
-    println!("Finished processing emotes for channel {}", channel_id);
+    println!("Finished processing all {} new emotes for channel {}", new_emotes, channel_id);
     Ok(())
 }
 
 /// Find the best image file for an emote
 fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
-    // Prefer files in this order: 3x WebP, 3x GIF, 3x PNG
-    if let Some(file) = files.iter().find(|f| f.name.contains("3x") && f.format == "WEBP") {
-        return Some(file);
-    }
-    if let Some(file) = files.iter().find(|f| f.name.contains("3x") && f.format == "GIF") {
-        return Some(file);
-    }
-    if let Some(file) = files.iter().find(|f| f.name.contains("3x") && f.format == "PNG") {
-        return Some(file);
-    }
-    // Fallback to 1x if 3x not available
+    // Prefer 1x since it saves space
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "WEBP") {
         return Some(file);
     }
@@ -450,7 +501,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     message_box.set_valign(gtk::Align::Start);
     message_box.set_halign(gtk::Align::Start);
 
-    let resource_manager = Arc::new(Mutex::new(MediaResourceManager::new()));
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
 
@@ -468,25 +518,54 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             }
 
             let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
-            let mut manager = resource_manager.lock().unwrap();
 
             if !std::path::Path::new(&expanded_path).exists() {
                 continue;
             }
 
-            let widget = if emote.is_gif {
-                let resource = GifMediaResource::new(&expanded_path);
-                let widget = resource.get_widget();
-                manager.add_resource(resource);
-                widget
-            } else {
-                let resource = StaticImageResource::new(&expanded_path);
-                let widget = resource.get_widget();
-                manager.add_resource(resource);
-                widget
-            };
+            // Create the appropriate widget based on the emote type
+            if emote.is_gif {
+                // For GIFs, use MediaFile inside a Picture
+                let media_file = gtk::MediaFile::for_filename(&expanded_path);
+                let picture = gtk::Picture::new();
 
-            message_box.append(&widget);
+                picture.set_paintable(Some(&media_file));
+                picture.set_size_request(-1, 28); // Consistent size for all emotes
+
+                // Set up playback properties
+                media_file.play();
+                media_file.set_loop(true);
+
+                // Use clone-able handles for cleanup
+                let media_file_clone = media_file.clone();
+
+                // Connect to the destroy signal to clean up resources
+                picture.connect_destroy(move |_| {
+                    // These operations need to be done on the original media_file object
+                    // media_file_clone.pause();
+                    // media_file_clone.set_loop(false);
+                    media_file_clone.set_file(None::<&gio::File>);
+                });
+
+                message_box.append(&picture);
+            } else {
+                // For static images, use a simpler widget
+                let media_file = gtk::MediaFile::for_filename(&expanded_path);
+                let picture = gtk::Picture::new();
+
+                picture.set_paintable(Some(&media_file));
+                picture.set_size_request(-1, 28); // Consistent size for all emotes
+                // Use clone-able handles for cleanup
+                let media_file_clone = media_file.clone();
+
+                // Connect to the destroy signal to clean up resources
+                picture.connect_destroy(move |_| {
+                    // These operations need to be done on the original media_file object
+                    media_file_clone.set_file(None::<&gio::File>);
+                });
+
+                message_box.append(&picture);
+            }
         } else {
             buffer.push_str(word);
         }
@@ -533,16 +612,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
-
-    let resource_manager_clone = resource_manager.clone();
-    row.connect_destroy(move |_| {
-        if let Ok(mut manager) = resource_manager_clone.try_lock() {
-            for resource in &mut manager.resources {
-                resource.cleanup();
-            }
-            manager.resources.clear();
-        }
-    });
 
     row.upcast::<Widget>()
 }
