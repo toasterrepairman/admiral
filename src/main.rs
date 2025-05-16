@@ -128,7 +128,7 @@ fn build_ui(app: &Application) {
             list.prepend(&row);
 
             // Limit the number of displayed messages
-            let max_messages = 20;
+            let max_messages = 100;
             let row_count = list.observe_children().n_items();
             if row_count > max_messages as u32 {
                 if let Some(last_row) = list.last_child() {
