@@ -76,21 +76,15 @@
 
             install -Dt $out/share/icons resources/icon-admiral.png
         '';
-        installPhase = ''
-          mkdir -p $out/bin
-
-          # Install your actual binary
-          install -Dm755 target/release/admiral $out/bin/admiral-real
-
-          # Wrap with GStreamer plugin path
-          makeWrapper $out/bin/admiral-real $out/bin/admiral \
-          --set GST_PLUGIN_SYSTEM_PATH_1_0 "${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
+        postInstall = ''
+          wrapProgram $out/bin/admiral \
+            --set GST_PLUGIN_SYSTEM_PATH_1_0 "${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
             pkgs.gst_all_1.gst-plugins-base
             pkgs.gst_all_1.gst-plugins-good
             pkgs.gst_all_1.gst-plugins-bad
             pkgs.gst_all_1.gst-plugins-ugly
             pkgs.gst_all_1.gst-libav
-          ]}"
+            ]}"
         '';
       };
     in {
