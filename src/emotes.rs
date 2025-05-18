@@ -132,13 +132,14 @@ impl MediaResource for StaticImageResource {
     }
 }
 
-/// Get emotes for a specific channel from the local filesystem
-/// and synchronize with 7TV if needed
+/// Synchronize with 7TV if needed
 pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
     let mut emotes = HashMap::new();
+    // Expand tilde to full path for emote storage
     let base_path = shellexpand::tilde("~/.config/admiral/emotes").to_string();
     let channel_path = Path::new(&base_path).join(channel_id);
 
+    // Ensure the channel directory exists
     if !channel_path.exists() {
         if let Err(e) = fs::create_dir_all(&channel_path) {
             eprintln!("Failed to create emote directory for channel {}: {}", channel_id, e);
@@ -146,22 +147,30 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
         }
     }
 
+    // Load any already-downloaded emotes from disk
     if let Ok(entries) = fs::read_dir(&channel_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                let is_gif = path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_lowercase() == "gif").unwrap_or(false);
+            if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+                let is_gif = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("gif"))
+                    .unwrap_or(false);
+                let full_path = path.to_string_lossy().to_string();
                 let emote = Emote {
-                    name: file_name.to_string(),
-                    url: String::new(),
-                    local_path: path.to_string_lossy().to_string(),
+                    name: file_stem.to_string(),
+                    // Use the full local file path as the URL
+                    url: full_path.clone(),
+                    local_path: full_path,
                     is_gif,
                 };
-                emotes.insert(file_name.to_string(), emote);
+                emotes.insert(file_stem.to_string(), emote);
             }
         }
     }
 
+    // Trigger background download for any missing emotes
     fetch_missing_emotes(channel_id);
     emotes
 }
