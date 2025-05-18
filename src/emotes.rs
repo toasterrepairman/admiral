@@ -86,7 +86,7 @@ impl GifMediaResource {
         let picture = gtk::Picture::new();
 
         picture.set_paintable(Some(&media_file));
-        picture.set_size_request(-1, 16); // Consistent size for all emotes
+        picture.set_size_request(-1, 28); // Consistent size for all emotes
 
         media_file.play();
         media_file.set_loop(true);
@@ -99,38 +99,39 @@ impl MediaResource for GifMediaResource {
     fn get_widget(&self) -> Widget {
         self.picture.clone().upcast::<Widget>()
     }
-
     fn cleanup(&mut self) {
-        self.media_file.pause();
-        self.media_file.set_loop(false);
-        self.media_file.set_file(None::<&gio::File>);
-        self.media_file.set_resource(None);
-
-        self.picture.set_paintable(None::<&gtk::gdk::Paintable>);
+        // Only pause the media if it's still playing
+        if self.media_file.is_playing() {
+            self.media_file.pause();
+        }
+        // Do NOT set the paintable to None here. Let GTK handle the widget lifecycle.
     }
 }
 
-
 // Implementation for static images
 struct StaticImageResource {
-    image: gtk::Image,
+    picture: gtk::Picture,
 }
 
 impl StaticImageResource {
     fn new(path: &str) -> Self {
-        let image = gtk::Image::from_file(path);
-        image.set_size_request(-1, 16); // Consistent size for all emotes
-        Self { image }
+        let media_file = gtk::MediaFile::for_filename(path);
+        let picture = gtk::Picture::new();
+
+        picture.set_paintable(Some(&media_file));
+        picture.set_size_request(-1, 28); // Consistent size for all emotes
+
+        Self { picture }
     }
 }
 
 impl MediaResource for StaticImageResource {
     fn get_widget(&self) -> Widget {
-        self.image.clone().upcast::<Widget>()
+        self.picture.clone().upcast::<Widget>()
     }
-
     fn cleanup(&mut self) {
-        // Static images don't need special cleanup beyond what GTK handles
+        // Static images don't need special cleanup beyond what GTK handles.
+        // Do NOT try to modify the picture here.
     }
 }
 
@@ -616,6 +617,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             if !buffer.is_empty() {
                 let label = Label::new(Some(&buffer));
                 label.set_wrap(true);
+                label.add_css_class("message-text");
                 label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                 label.set_xalign(0.0);
                 message_box.append(&label);
@@ -652,6 +654,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     if !buffer.is_empty() {
         let label = Label::new(Some(&buffer));
         label.set_wrap(true);
+        label.add_css_class("message-text");
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_xalign(0.0);
         message_box.append(&label);
@@ -677,6 +680,9 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         }
         .message-row {
             background-color: transparent;
+        }
+        .message-text {
+            font-size: 12pt;
         }
         .dim-label {
             color: alpha(#aaa, 0.8);
