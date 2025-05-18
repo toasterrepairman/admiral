@@ -1,6 +1,6 @@
 
 use gtk::prelude::*;
-use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow};
+use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile};
 use gtk::Box as GtkBox;
 use twitch_irc::message::PrivmsgMessage;
 use chrono::Local;
@@ -456,6 +456,7 @@ fn rgb_to_hex(color: &RGBColor) -> String {
 }
 
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
+    // Create the main container
     let container = GtkBox::new(Orientation::Vertical, 2);
     container.set_margin_top(4);
     container.set_margin_bottom(4);
@@ -463,9 +464,11 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.set_margin_end(8);
     container.add_css_class("message-box");
 
+    // Create header with username and timestamp
     let header_box = GtkBox::new(Orientation::Horizontal, 0);
     header_box.set_hexpand(true);
 
+    // Set up username label with appropriate color
     let sender_label = Label::new(None);
     sender_label.set_xalign(0.0);
     sender_label.set_hexpand(true);
@@ -484,6 +487,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         ));
     }
 
+    // Set up timestamp
     let timestamp = Label::new(Some(
         &msg.server_timestamp
             .with_timezone(&Local)
@@ -496,18 +500,27 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     header_box.append(&sender_label);
     header_box.append(&timestamp);
 
+    // Create message content box
     let message_box = GtkBox::new(Orientation::Horizontal, 2);
     message_box.set_hexpand(true);
     message_box.set_valign(gtk::Align::Start);
     message_box.set_halign(gtk::Align::Start);
+    message_box.add_css_class("message-content");
 
+    // Use regex to split message into tokens (words and whitespace)
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
 
+    // Create a list of media resources that need to be properly managed
+    let resource_manager = Arc::new(Mutex::new(Vec::<MediaFile>::new()));
+
     for cap in re.find_iter(&msg.message_text) {
         let word = cap.as_str();
+        let word_trim = word.trim();
 
-        if let Some(emote) = emote_map.get(word.trim()) {
+        // Check if this word is an emote
+        if !word_trim.is_empty() && emote_map.contains_key(word_trim) {
+            // Flush any accumulated text before adding the emote
             if !buffer.is_empty() {
                 let label = Label::new(Some(&buffer));
                 label.set_wrap(true);
@@ -517,60 +530,51 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
                 buffer.clear();
             }
 
-            let expanded_path = shellexpand::tilde(&emote.local_path).to_string();
+            // Get emote details
+            let emote = &emote_map[word_trim];
+            let path = shellexpand::tilde(&emote.local_path).to_string();
 
-            if !std::path::Path::new(&expanded_path).exists() {
+            // Skip if file doesn't exist
+            if !Path::new(&path).exists() {
+                buffer.push_str(word);
                 continue;
             }
 
-            // Create the appropriate widget based on the emote type
+            // Create appropriate widget based on whether it's a GIF or static image
             if emote.is_gif {
-                // For GIFs, use MediaFile inside a Picture
-                let media_file = gtk::MediaFile::for_filename(&expanded_path);
-                let picture = gtk::Picture::new();
-
-                picture.set_paintable(Some(&media_file));
-                picture.set_size_request(-1, 28); // Consistent size for all emotes
-
-                // Set up playback properties
-                media_file.play();
+                // For GIFs, use Picture with MediaFile for animation
+                let media_file = MediaFile::for_filename(&path);
                 media_file.set_loop(true);
 
-                // Use clone-able handles for cleanup
-                let media_file_clone = media_file.clone();
+                let picture = gtk::Picture::new();
+                picture.set_paintable(Some(&media_file));
+                picture.set_size_request(-1, 28); // Consistent size
 
-                // Connect to the destroy signal to clean up resources
-                picture.connect_destroy(move |_| {
-                    // These operations need to be done on the original media_file object
-                    // media_file_clone.pause();
-                    // media_file_clone.set_loop(false);
-                    media_file_clone.set_file(None::<&gio::File>);
+                // Only start playing if visible
+                media_file.play();
+
+                // Store media resources for cleanup
+                let resource_clone = resource_manager.clone();
+                let media_file_clone = media_file.clone();
+                picture.connect_unrealize(move |_| {
+                    let mut resources = resource_clone.lock().unwrap();
+                    resources.push(media_file_clone.clone());
                 });
 
                 message_box.append(&picture);
             } else {
-                // For static images, use a simpler widget
-                let media_file = gtk::MediaFile::for_filename(&expanded_path);
-                let picture = gtk::Picture::new();
-
-                picture.set_paintable(Some(&media_file));
-                picture.set_size_request(-1, 28); // Consistent size for all emotes
-                // Use clone-able handles for cleanup
-                let media_file_clone = media_file.clone();
-
-                // Connect to the destroy signal to clean up resources
-                picture.connect_destroy(move |_| {
-                    // These operations need to be done on the original media_file object
-                    media_file_clone.set_file(None::<&gio::File>);
-                });
-
-                message_box.append(&picture);
+                // For static images, use Image widget which is more efficient
+                let image = Image::from_file(&path);
+                image.set_pixel_size(28); // Consistent size
+                message_box.append(&image);
             }
         } else {
+            // Accumulate regular text
             buffer.push_str(word);
         }
     }
 
+    // Flush any remaining text
     if !buffer.is_empty() {
         let label = Label::new(Some(&buffer));
         label.set_wrap(true);
@@ -579,6 +583,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         message_box.append(&label);
     }
 
+    // Assemble the row
     container.append(&header_box);
     container.append(&message_box);
 
@@ -586,6 +591,19 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
+    // Make sure to clean up media resources when row is destroyed
+    let resource_manager_clone = resource_manager.clone();
+    row.connect_destroy(move |_| {
+        let mut resources = resource_manager_clone.lock().unwrap();
+        for media_file in resources.drain(..) {
+            // Properly clean up media resources
+            media_file.pause();
+            media_file.set_loop(false);
+            media_file.set_file(None::<&gio::File>);
+        }
+    });
+
+    // Apply CSS styling
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(
         "
@@ -601,6 +619,9 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         .dim-label {
             color: alpha(#888, 0.8);
             font-size: 0.8em;
+        }
+        .message-content {
+            padding-top: 4px;
         }
         ",
     );
