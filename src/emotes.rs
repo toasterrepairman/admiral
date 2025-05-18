@@ -447,9 +447,6 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
 /// Find the best image file for an emote
 fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
     // Prefer 1x since it saves space
-    if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "WEBP") {
-        return Some(file);
-    }
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "GIF") {
         return Some(file);
     }
