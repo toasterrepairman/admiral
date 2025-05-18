@@ -452,7 +452,34 @@ fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
 
 /// Converts an `RGBColor` to a CSS hex string like "#RRGGBB"
 fn rgb_to_hex(color: &RGBColor) -> String {
-    format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
+    let mut r = color.r as f32 / 255.0;
+    let mut g = color.g as f32 / 255.0;
+    let mut b = color.b as f32 / 255.0;
+
+    // Convert to perceived luminance
+    let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+
+    // Ensure minimum contrast (raise luminance if too dark)
+    if luminance < 0.3 {
+        let boost = 0.3 / (luminance + 0.001);
+        r *= boost;
+        g *= boost;
+        b *= boost;
+    }
+
+    // Reduce vibrancy slightly (cap saturation)
+    let avg = (r + g + b) / 3.0;
+    let vibrancy_limit = 0.7;
+    r = avg + (r - avg) * vibrancy_limit;
+    g = avg + (g - avg) * vibrancy_limit;
+    b = avg + (b - avg) * vibrancy_limit;
+
+    // Clamp to valid RGB range and convert back
+    let r = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+
+    format!("#{:02X}{:02X}{:02X}", r, g, b)
 }
 
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
