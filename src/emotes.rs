@@ -1,7 +1,7 @@
-
 use gtk::prelude::*;
 use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile};
 use gtk::Box as GtkBox;
+use glib::prelude::*;
 use twitch_irc::message::PrivmsgMessage;
 use chrono::Local;
 use twitch_irc::message::RGBColor;
@@ -86,7 +86,7 @@ impl GifMediaResource {
         let picture = gtk::Picture::new();
 
         picture.set_paintable(Some(&media_file));
-        picture.set_size_request(-1, 28); // Consistent size for all emotes
+        picture.set_size_request(-1, 16); // Consistent size for all emotes
 
         media_file.play();
         media_file.set_loop(true);
@@ -104,10 +104,12 @@ impl MediaResource for GifMediaResource {
         self.media_file.pause();
         self.media_file.set_loop(false);
         self.media_file.set_file(None::<&gio::File>);
-        self.picture.set_paintable(None::<&gtk::gdk::Paintable>);
         self.media_file.set_resource(None);
+
+        self.picture.set_paintable(None::<&gtk::gdk::Paintable>);
     }
 }
+
 
 // Implementation for static images
 struct StaticImageResource {
@@ -117,7 +119,7 @@ struct StaticImageResource {
 impl StaticImageResource {
     fn new(path: &str) -> Self {
         let image = gtk::Image::from_file(path);
-        image.set_pixel_size(28); // Consistent size for all emotes
+        image.set_size_request(-1, 16); // Consistent size for all emotes
         Self { image }
     }
 }
