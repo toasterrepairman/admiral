@@ -507,12 +507,69 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     message_box.set_halign(gtk::Align::Start);
     message_box.add_css_class("message-content");
 
+    // Create header with username and timestamp
+    let header_box = GtkBox::new(Orientation::Horizontal, 0);
+    header_box.set_hexpand(true);
+
+    // Set up username label with appropriate color
+    let sender_label = Label::new(None);
+    sender_label.set_xalign(0.0);
+    sender_label.set_hexpand(true);
+
+    if let Some(color) = &msg.name_color {
+        let color_hex = rgb_to_hex(color);
+        sender_label.set_markup(&format!(
+            "<span foreground=\"{}\"><b>{}</b></span>",
+            color_hex,
+            glib::markup_escape_text(&msg.sender.name)
+        ));
+    } else {
+        sender_label.set_markup(&format!(
+            "<b>{}</b>",
+            glib::markup_escape_text(&msg.sender.name)
+        ));
+    }
+
+    // Set up timestamp
+    let timestamp = Label::new(Some(
+        &msg.server_timestamp
+            .with_timezone(&Local)
+            .format("%-I:%M:%S %p")
+            .to_string(),
+    ));
+    timestamp.add_css_class("dim-label");
+    timestamp.set_xalign(1.0);
+
+    header_box.append(&sender_label);
+    header_box.append(&timestamp);
+
     // Use regex to split message into tokens (words and whitespace)
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
 
-    // Create a list of media resources that need to be properly managed
-    let resource_manager = Arc::new(Mutex::new(Vec::<MediaFile>::new()));
+    let container = GtkBox::new(Orientation::Vertical, 2);
+    container.set_margin_top(4);
+    container.set_margin_bottom(4);
+    container.set_margin_start(8);
+    container.set_margin_end(8);
+    container.add_css_class("message-box");
+
+    container.append(&header_box);
+
+    let message_box = GtkBox::new(Orientation::Horizontal, 2);
+    message_box.set_hexpand(true);
+    message_box.set_valign(gtk::Align::Start);
+    message_box.set_halign(gtk::Align::Start);
+    message_box.add_css_class("message-content");
+    container.append(&message_box);
+
+    let row = ListBoxRow::new();
+    row.set_child(Some(&container));
+    row.add_css_class("message-row");
+
+    // Create a RefCell to hold the MediaResourceManager for this row
+    let resource_manager = std::rc::Rc::new(std::cell::RefCell::new(MediaResourceManager::new()));
+    let resource_manager_clone_for_destroy = std::rc::Rc::clone(&resource_manager);
 
     for cap in re.find_iter(&msg.message_text) {
         let word = cap.as_str();
@@ -542,31 +599,13 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
             // Create appropriate widget based on whether it's a GIF or static image
             if emote.is_gif {
-                // For GIFs, use Picture with MediaFile for animation
-                let media_file = MediaFile::for_filename(&path);
-                media_file.set_loop(true);
-
-                let picture = gtk::Picture::new();
-                picture.set_paintable(Some(&media_file));
-                picture.set_size_request(-1, 28); // Consistent size
-
-                // Only start playing if visible
-                media_file.play();
-
-                // Store media resources for cleanup
-                let resource_clone = resource_manager.clone();
-                let media_file_clone = media_file.clone();
-                picture.connect_unrealize(move |_| {
-                    let mut resources = resource_clone.lock().unwrap();
-                    resources.push(media_file_clone.clone());
-                });
-
-                message_box.append(&picture);
+                let gif_resource = GifMediaResource::new(&path);
+                message_box.append(&gif_resource.get_widget());
+                resource_manager.borrow_mut().add_resource(gif_resource);
             } else {
-                // For static images, use Image widget which is more efficient
-                let image = Image::from_file(&path);
-                image.set_pixel_size(28); // Consistent size
-                message_box.append(&image);
+                let static_resource = StaticImageResource::new(&path);
+                message_box.append(&static_resource.get_widget());
+                resource_manager.borrow_mut().add_resource(static_resource);
             }
         } else {
             // Accumulate regular text
@@ -583,24 +622,12 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         message_box.append(&label);
     }
 
-    // Assemble the row
-    container.append(&header_box);
-    container.append(&message_box);
-
-    let row = ListBoxRow::new();
-    row.set_child(Some(&container));
-    row.add_css_class("message-row");
-
-    // Make sure to clean up media resources when row is destroyed
-    let resource_manager_clone = resource_manager.clone();
+    // Clean up all media resources when the row is destroyed
     row.connect_destroy(move |_| {
-        let mut resources = resource_manager_clone.lock().unwrap();
-        for media_file in resources.drain(..) {
-            // Properly clean up media resources
-            media_file.pause();
-            media_file.set_loop(false);
-            media_file.set_file(None::<&gio::File>);
-        }
+        let mut rm = resource_manager_clone_for_destroy.borrow_mut();
+        rm.resources.iter_mut().for_each(|res| res.cleanup());
+        rm.resources.clear();
+        println!("Message row destroyed, media resources cleaned up.");
     });
 
     // Apply CSS styling
@@ -617,7 +644,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             background-color: transparent;
         }
         .dim-label {
-            color: alpha(#888, 0.8);
+            color: alpha(#aaa, 0.8);
             font-size: 0.8em;
         }
         .message-content {
