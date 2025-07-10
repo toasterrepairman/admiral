@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile, Picture};
+use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile, Picture, Popover, PopoverMenu, GestureClick};
 use gtk::Box as GtkBox;
 use glib::prelude::*;
 use twitch_irc::message::PrivmsgMessage;
@@ -103,6 +103,7 @@ struct ImageFile {
 struct EmoteWidget {
     widget: Picture,
     _media_file: Option<MediaFile>, // Keep reference to prevent cleanup
+    popover: Popover,
 }
 
 impl EmoteWidget {
@@ -127,9 +128,29 @@ impl EmoteWidget {
             }
         }
 
+        // Create popover with emote name
+        let popover = Popover::new();
+        popover.set_parent(&picture);
+        popover.set_position(gtk::PositionType::Top);
+        popover.set_autohide(true);
+
+        let popover_label = Label::new(Some(&format!(":{}: ", cached_emote.name)));
+        popover_label.add_css_class("emote-popover-label");
+        popover.set_child(Some(&popover_label));
+
+        // Add click gesture to show popover
+        let gesture = GestureClick::new();
+        gesture.set_button(0); // Any button
+        let popover_clone = popover.clone();
+        gesture.connect_pressed(move |_, _, _, _| {
+            popover_clone.popup();
+        });
+        picture.add_controller(gesture);
+
         Self {
             widget: picture,
             _media_file: media_file,
+            popover,
         }
     }
 
@@ -164,6 +185,8 @@ impl MessageResourceManager {
                 // Clear the paintable to free VRAM
                 emote_widget.widget.set_paintable(None::<&gdk::Paintable>);
             }
+            // Unparent the popover to clean up
+            emote_widget.popover.unparent();
         }
         self.emote_widgets.clear();
     }
@@ -660,6 +683,11 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         }
         .message-content {
             padding-top: 4px;
+        }
+        .emote-popover-label {
+            font-family: monospace;
+            font-size: 11pt;
+            padding: 4px 8px;
         }
         ",
     );
