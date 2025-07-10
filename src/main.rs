@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar};
-use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button as GtkButton, Orientation, Box, Align, Widget, MenuButton, Popover};
+use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button as GtkButton, Orientation, Box, Align, Widget, MenuButton, Popover, Stack};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 mod auth;
 mod emotes;
-use crate::emotes::{get_emote_map, parse_message};
+use crate::emotes::{get_emote_map, parse_message, cleanup_emote_cache};
 use crate::auth::create_auth_window;
 
 #[tokio::main]
@@ -35,7 +35,7 @@ fn build_ui(app: &Application) {
         .build();
 
     let header = HeaderBar::builder()
-        .show_title(false)
+        .show_title(true)
         .css_classes(["flat"])
         .build();
 
@@ -78,14 +78,46 @@ fn build_ui(app: &Application) {
         .child(&listbox)
         .build();
 
+    // Create placeholder window
+    let placeholder_box = Box::new(Orientation::Vertical, 12);
+    placeholder_box.set_valign(Align::Center);
+    placeholder_box.set_halign(Align::Center);
+    placeholder_box.set_margin_top(60);
+    placeholder_box.set_margin_bottom(60);
+    placeholder_box.set_margin_start(40);
+    placeholder_box.set_margin_end(40);
+
+    let main_label = Label::new(Some("Choose a channel"));
+    main_label.set_css_classes(&["title-1"]);
+    main_label.set_halign(Align::Center);
+
+    let subtitle_label = Label::new(Some("Click the widget in the top left corner"));
+    subtitle_label.set_css_classes(&["dim-label"]);
+    subtitle_label.set_halign(Align::Center);
+
+    placeholder_box.append(&main_label);
+    placeholder_box.append(&subtitle_label);
+
+    // Create stack to switch between placeholder and chat
+    let stack = Stack::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+
+    stack.add_named(&placeholder_box, Some("placeholder"));
+    stack.add_named(&scrolled_window, Some("chat"));
+    stack.set_visible_child_name("placeholder");
+
     content.append(&header);
-    content.append(&scrolled_window);
+    content.append(&stack);
 
     let message_list = Arc::new(Mutex::new(listbox.clone()));
+    let stack_ref = Arc::new(Mutex::new(stack.clone()));
     let (tx, mut rx) = mpsc::channel(100);
+    let (error_tx, mut error_rx) = mpsc::channel(10);
     let active_task: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
-    connect_button.connect_clicked(clone!(@strong message_list, @strong active_task => move |_| {
+    connect_button.connect_clicked(clone!(@strong message_list, @strong active_task, @strong stack_ref => move |_| {
         // Abort any existing task
         if let Some(handle) = active_task.lock().unwrap().take() {
             handle.abort();
@@ -94,8 +126,12 @@ fn build_ui(app: &Application) {
         // Clear existing messages
         message_list.lock().unwrap().remove_all();
 
+        // Switch to chat view
+        stack_ref.lock().unwrap().set_visible_child_name("chat");
+
         let channel = entry.text().to_string();
         let tx = tx.clone();
+        let error_tx = error_tx.clone();
         let message_list = message_list.clone();
 
         let new_handle = task::spawn(async move {
@@ -104,6 +140,10 @@ fn build_ui(app: &Application) {
 
             if let Err(e) = client.join(channel) {
                 eprintln!("Failed to join channel: {}", e);
+
+                // Send error signal to main thread
+                let _ = error_tx.send(()).await;
+
                 return;
             }
 
@@ -119,7 +159,14 @@ fn build_ui(app: &Application) {
         *active_task.lock().unwrap() = Some(new_handle);
     }));
 
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+    // Message processing timer (100ms)
+    glib::timeout_add_local(std::time::Duration::from_millis(100), clone!(@strong stack_ref => move || {
+        // Handle connection errors
+        while let Ok(_) = error_rx.try_recv() {
+            stack_ref.lock().unwrap().set_visible_child_name("placeholder");
+        }
+
+        // Handle incoming messages
         while let Ok(msg) = rx.try_recv() {
             let channelid = &msg.channel_id;
             let emote_map = get_emote_map(&channelid);
@@ -136,6 +183,13 @@ fn build_ui(app: &Application) {
                 }
             }
         }
+        glib::ControlFlow::Continue
+    }));
+
+    // Emote cache cleanup timer (30 seconds)
+    glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
+        cleanup_emote_cache();
+        println!("Cleaning cache...");
         glib::ControlFlow::Continue
     });
 

@@ -108,7 +108,7 @@ struct EmoteWidget {
 impl EmoteWidget {
     fn new(cached_emote: &Arc<CachedEmote>) -> Self {
         let picture = Picture::new();
-        picture.set_size_request(28, 28);
+        picture.set_size_request(-0, 28);
         picture.set_can_shrink(false);
 
         let mut media_file = None;
