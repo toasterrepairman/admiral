@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile};
+use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile, Picture};
 use gtk::Box as GtkBox;
 use glib::prelude::*;
 use twitch_irc::message::PrivmsgMessage;
@@ -14,6 +14,11 @@ use std::error::Error as StdError;
 use serde::Deserialize;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+// Global emote cache to prevent loading the same emote multiple times
+static EMOTE_CACHE: Lazy<RwLock<HashMap<String, Arc<CachedEmote>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 // Tracking which channels are currently being processed
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| RwLock::new(HashMap::new()));
@@ -21,13 +26,39 @@ static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| 
 // Tracking the last time we fetched emotes for a channel
 static LAST_FETCH_TIME: Lazy<RwLock<HashMap<String, Instant>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
+// Cached emote data to prevent reloading
+#[derive(Debug, Clone)]
+struct CachedEmote {
+    name: String,
+    texture: Option<gdk::Texture>,
+    is_gif: bool,
+    path: String,
+}
+
+impl CachedEmote {
+    fn new(name: String, path: String, is_gif: bool) -> Self {
+        let texture = if Path::new(&path).exists() {
+            gdk::Texture::from_filename(&path).ok()
+        } else {
+            None
+        };
+
+        Self {
+            name,
+            texture,
+            is_gif,
+            path,
+        }
+    }
+}
+
 // Your existing Emote struct for local representation
 #[derive(Debug, Clone)]
 pub struct Emote {
     name: String,
-    url: String, // This would be the fully constructed CDN URL
+    url: String,
     local_path: String,
-    is_gif: bool, // Or more generally, is_animated
+    is_gif: bool,
 }
 
 // --- Updated 7TV API Response Structures ---
@@ -68,81 +99,126 @@ struct ImageFile {
     format: String,
 }
 
-// Define a trait for media resources to ensure proper cleanup
-trait MediaResource {
-    fn get_widget(&self) -> Widget;
-    fn cleanup(&mut self);
+// Lightweight emote widget that reuses cached resources
+struct EmoteWidget {
+    widget: Picture,
+    _media_file: Option<MediaFile>, // Keep reference to prevent cleanup
 }
 
-// Implementation for GIF animations using MediaFile
-struct GifMediaResource {
-    media_file: gtk::MediaFile,
-    picture: gtk::Picture,
-}
+impl EmoteWidget {
+    fn new(cached_emote: &Arc<CachedEmote>) -> Self {
+        let picture = Picture::new();
+        picture.set_size_request(28, 28);
+        picture.set_can_shrink(false);
 
-impl GifMediaResource {
-    fn new(path: &str) -> Self {
-        let media_file = gtk::MediaFile::for_filename(path);
-        let picture = gtk::Picture::new();
+        let mut media_file = None;
 
-        picture.set_paintable(Some(&media_file));
-        picture.set_size_request(-1, 28); // Consistent size for all emotes
-
-        media_file.play();
-        media_file.set_loop(true);
-
-        Self { media_file, picture }
-    }
-}
-
-impl MediaResource for GifMediaResource {
-    fn get_widget(&self) -> Widget {
-        self.picture.clone().upcast::<Widget>()
-    }
-    fn cleanup(&mut self) {
-        // Only pause the media if it's still playing
-        if self.media_file.is_playing() {
-            self.media_file.pause();
+        if let Some(ref texture) = cached_emote.texture {
+            if cached_emote.is_gif {
+                // For GIFs, we need MediaFile for animation
+                let mf = MediaFile::for_filename(&cached_emote.path);
+                mf.set_loop(true);
+                picture.set_paintable(Some(&mf));
+                mf.play();
+                media_file = Some(mf);
+            } else {
+                // For static images, use the texture directly
+                picture.set_paintable(Some(texture));
+            }
         }
-        // Do NOT set the paintable to None here. Let GTK handle the widget lifecycle.
+
+        Self {
+            widget: picture,
+            _media_file: media_file,
+        }
     }
-}
 
-// Implementation for static images
-struct StaticImageResource {
-    picture: gtk::Picture,
-}
-
-impl StaticImageResource {
-    fn new(path: &str) -> Self {
-        let media_file = gtk::MediaFile::for_filename(path);
-        let picture = gtk::Picture::new();
-
-        picture.set_paintable(Some(&media_file));
-        picture.set_size_request(-1, 28); // Consistent size for all emotes
-
-        Self { picture }
-    }
-}
-
-impl MediaResource for StaticImageResource {
     fn get_widget(&self) -> Widget {
-        self.picture.clone().upcast::<Widget>()
+        self.widget.clone().upcast::<Widget>()
     }
+}
+
+// Resource manager for cleanup
+struct MessageResourceManager {
+    emote_widgets: Vec<EmoteWidget>,
+}
+
+impl MessageResourceManager {
+    fn new() -> Self {
+        Self {
+            emote_widgets: Vec::new(),
+        }
+    }
+
+    fn add_emote_widget(&mut self, widget: EmoteWidget) {
+        self.emote_widgets.push(widget);
+    }
+
     fn cleanup(&mut self) {
-        // Static images don't need special cleanup beyond what GTK handles.
-        // Do NOT try to modify the picture here.
+        // Explicit cleanup of MediaFile resources
+        for emote_widget in &mut self.emote_widgets {
+            if let Some(ref media_file) = emote_widget._media_file {
+                if media_file.is_playing() {
+                    media_file.pause();
+                }
+                // Clear the paintable to free VRAM
+                emote_widget.widget.set_paintable(None::<&gdk::Paintable>);
+            }
+        }
+        self.emote_widgets.clear();
+    }
+}
+
+// Get cached emote or load it
+fn get_cached_emote(emote: &Emote) -> Arc<CachedEmote> {
+    let cache_key = format!("{}:{}", emote.name, emote.local_path);
+
+    {
+        let cache = EMOTE_CACHE.read().unwrap();
+        if let Some(cached) = cache.get(&cache_key) {
+            return Arc::clone(cached);
+        }
+    }
+
+    // Load emote into cache
+    let cached_emote = Arc::new(CachedEmote::new(
+        emote.name.clone(),
+        emote.local_path.clone(),
+        emote.is_gif,
+    ));
+
+    {
+        let mut cache = EMOTE_CACHE.write().unwrap();
+        cache.insert(cache_key, Arc::clone(&cached_emote));
+    }
+
+    cached_emote
+}
+
+// Periodic cache cleanup to prevent unbounded growth
+pub fn cleanup_emote_cache() {
+    let mut cache = EMOTE_CACHE.write().unwrap();
+
+    // Remove entries where the file no longer exists
+    cache.retain(|_, cached_emote| {
+        Path::new(&cached_emote.path).exists()
+    });
+
+    // If cache is still too large, remove oldest entries
+    if cache.len() > 1000 {
+        let keys_to_remove: Vec<_> = cache.keys().take(cache.len() - 800).cloned().collect();
+        for key in keys_to_remove {
+            cache.remove(&key);
+        }
     }
 }
 
 /// Synchronize with 7TV if needed
 pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
     let mut emotes = HashMap::new();
-    // Expand tilde to full path for emote storage
     let base_path = shellexpand::tilde("~/.config/admiral/emotes").to_string();
     let channel_path = Path::new(&base_path).join(channel_id);
 
-    // Ensure the channel directory exists
     if !channel_path.exists() {
         if let Err(e) = fs::create_dir_all(&channel_path) {
             eprintln!("Failed to create emote directory for channel {}: {}", channel_id, e);
@@ -150,7 +226,6 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
         }
     }
 
-    // Load any already-downloaded emotes from disk
     if let Ok(entries) = fs::read_dir(&channel_path) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -163,7 +238,6 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
                 let full_path = path.to_string_lossy().to_string();
                 let emote = Emote {
                     name: file_stem.to_string(),
-                    // Use the full local file path as the URL
                     url: full_path.clone(),
                     local_path: full_path,
                     is_gif,
@@ -173,12 +247,11 @@ pub fn get_emote_map(channel_id: &str) -> HashMap<String, Emote> {
         }
     }
 
-    // Trigger background download for any missing emotes
     fetch_missing_emotes(channel_id);
     emotes
 }
 
-const FETCH_COOLDOWN: Duration = Duration::from_secs(60 * 1); // 1 minute
+const FETCH_COOLDOWN: Duration = Duration::from_secs(60 * 1);
 
 fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
     let channel_id = channel_id.to_string();
@@ -195,7 +268,7 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
         let last_fetch_read = LAST_FETCH_TIME.read().unwrap();
         if let Some(&last_fetch) = last_fetch_read.get(&channel_id) {
             if now.duration_since(last_fetch) < FETCH_COOLDOWN {
-                return None; // Cooldown not yet elapsed
+                return None;
             }
         }
     }
@@ -233,10 +306,9 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
 
                 Some(thread::spawn(move || {
                     println!(
-                        "Detected {} missing emotes for channel {}, starting download (cooldown: {:?})...",
+                        "Detected {} missing emotes for channel {}, starting download...",
                         missing_emotes.len(),
-                        channel_id,
-                        FETCH_COOLDOWN
+                        channel_id
                     );
                     if let Err(e) = download_channel_emotes(&channel_id) {
                         eprintln!("Failed to download emotes for channel {}: {:?}", channel_id, e);
@@ -246,7 +318,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
                     downloading.insert(channel_id.clone(), false);
                 }))
             } else {
-                println!("No missing emotes detected for channel {} (cooldown: {:?}).", channel_id, FETCH_COOLDOWN);
                 None
             }
         }
@@ -292,13 +363,9 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
     let client = Client::new();
     let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
 
-    // Batch size for processing emotes - helps manage file handles
     const MAX_EMOTES_PER_BATCH: usize = 50;
-    // Rate limit for API calls - helps avoid 429 errors
     const BATCH_DELAY_MS: u64 = 500;
-    // Small delay between individual downloads within a batch
     const DOWNLOAD_DELAY_MS: u64 = 100;
-    // Maximum number of retries for failed downloads
     const MAX_RETRIES: usize = 3;
 
     let response = client.get(&twitch_lookup_url).send()?;
@@ -323,7 +390,6 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         fs::create_dir_all(&channel_path)?;
     }
 
-    // Load existing emotes to prevent redownloading
     let mut existing_emotes: HashSet<String> = HashSet::new();
     if let Ok(entries) = fs::read_dir(&channel_path) {
         for entry in entries.flatten() {
@@ -333,7 +399,6 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         }
     }
 
-    // Count total and new emotes
     let total_emotes = api_emote_set.emotes.len();
     let emotes_to_process: Vec<_> = api_emote_set.emotes.into_iter()
         .filter(|e| !existing_emotes.contains(&e.name))
@@ -345,7 +410,6 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
         channel_id, total_emotes, new_emotes
     );
 
-    // Process emotes in fixed-size batches to manage file handles
     let batch_count = (new_emotes + MAX_EMOTES_PER_BATCH - 1) / MAX_EMOTES_PER_BATCH;
     for (batch_idx, batch) in emotes_to_process.chunks(MAX_EMOTES_PER_BATCH).enumerate() {
         println!(
@@ -374,12 +438,6 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                         let emote_url = format!("https://{}/{}", base_emote_url, file_to_download.name);
                         let local_path = channel_path.join(format!("{}.{}", active_emote.name, file_extension));
 
-                        println!(
-                            "Downloading emote {}/{}: {} (URL: {})",
-                            emote_idx + 1, batch.len(), active_emote.name, emote_url
-                        );
-
-                        // Try downloading with retries
                         let mut success = false;
                         for retry in 1..=MAX_RETRIES {
                             let download_result = (|| -> Result<(), Box<dyn StdError + Send + Sync>> {
@@ -388,17 +446,13 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                                 if response.status().is_success() {
                                     let bytes = response.bytes()?;
 
-                                    // Write file with explicit scope to ensure handle is closed
                                     {
                                         let mut file_handle = File::create(&local_path)?;
                                         file_handle.write_all(&bytes)?;
-                                        // File handle is closed when it goes out of scope
                                     }
 
-                                    println!("Successfully downloaded emote {} to {:?}", active_emote.name, local_path);
                                     success = true;
                                 } else if response.status().as_u16() == 429 {
-                                    // Rate limited, wait longer
                                     println!("Rate limited (429) when downloading {}. Retrying after delay...", active_emote.name);
                                     thread::sleep(Duration::from_millis(DOWNLOAD_DELAY_MS * 5));
                                 } else {
@@ -416,29 +470,24 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                                           active_emote.name, retry, MAX_RETRIES, e);
 
                                 if retry == MAX_RETRIES {
-                                    // Last attempt failed, let's clean up any partial download
                                     if local_path.exists() {
                                         let _ = fs::remove_file(&local_path);
                                     }
                                 }
 
-                                // Wait before retrying
                                 thread::sleep(Duration::from_millis(DOWNLOAD_DELAY_MS * retry as u64));
                             } else if success {
-                                break; // Successfully downloaded, no need to retry
+                                break;
                             }
                         }
 
-                        // Small delay between downloads to avoid overwhelming the server
                         thread::sleep(Duration::from_millis(DOWNLOAD_DELAY_MS));
                     }
                 }
             }
         }
 
-        // Delay between batches to avoid rate limiting
         if batch_idx < batch_count - 1 {
-            println!("Finished batch {}/{}. Waiting before next batch...", batch_idx + 1, batch_count);
             thread::sleep(Duration::from_millis(BATCH_DELAY_MS));
         }
     }
@@ -447,9 +496,7 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
     Ok(())
 }
 
-/// Find the best image file for an emote
 fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
-    // Prefer 1x since it saves space
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format == "GIF") {
         return Some(file);
     }
@@ -459,16 +506,13 @@ fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
     files.first()
 }
 
-/// Converts an `RGBColor` to a CSS hex string like "#RRGGBB"
 fn rgb_to_hex(color: &RGBColor) -> String {
     let mut r = color.r as f32 / 255.0;
     let mut g = color.g as f32 / 255.0;
     let mut b = color.b as f32 / 255.0;
 
-    // Convert to perceived luminance
     let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
 
-    // Ensure minimum contrast (raise luminance if too dark)
     if luminance < 0.3 {
         let boost = 0.3 / (luminance + 0.001);
         r *= boost;
@@ -476,14 +520,12 @@ fn rgb_to_hex(color: &RGBColor) -> String {
         b *= boost;
     }
 
-    // Reduce vibrancy slightly (cap saturation)
     let avg = (r + g + b) / 3.0;
     let vibrancy_limit = 0.7;
     r = avg + (r - avg) * vibrancy_limit;
     g = avg + (g - avg) * vibrancy_limit;
     b = avg + (b - avg) * vibrancy_limit;
 
-    // Clamp to valid RGB range and convert back
     let r = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
     let g = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
     let b = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -492,7 +534,6 @@ fn rgb_to_hex(color: &RGBColor) -> String {
 }
 
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
-    // Create the main container
     let container = GtkBox::new(Orientation::Vertical, 2);
     container.set_margin_top(4);
     container.set_margin_bottom(4);
@@ -500,11 +541,9 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     container.set_margin_end(8);
     container.add_css_class("message-box");
 
-    // Create header with username and timestamp
     let header_box = GtkBox::new(Orientation::Horizontal, 0);
     header_box.set_hexpand(true);
 
-    // Set up username label with appropriate color
     let sender_label = Label::new(None);
     sender_label.set_xalign(0.0);
     sender_label.set_hexpand(true);
@@ -523,7 +562,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         ));
     }
 
-    // Set up timestamp
     let timestamp = Label::new(Some(
         &msg.server_timestamp
             .with_timezone(&Local)
@@ -536,84 +574,31 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     header_box.append(&sender_label);
     header_box.append(&timestamp);
 
-    // Create message content box
     let message_box = GtkBox::new(Orientation::Horizontal, 2);
     message_box.set_hexpand(true);
     message_box.set_valign(gtk::Align::Start);
     message_box.set_halign(gtk::Align::Start);
     message_box.add_css_class("message-content");
-
-    // Create header with username and timestamp
-    let header_box = GtkBox::new(Orientation::Horizontal, 0);
-    header_box.set_hexpand(true);
-
-    // Set up username label with appropriate color
-    let sender_label = Label::new(None);
-    sender_label.set_xalign(0.0);
-    sender_label.set_hexpand(true);
-
-    if let Some(color) = &msg.name_color {
-        let color_hex = rgb_to_hex(color);
-        sender_label.set_markup(&format!(
-            "<span foreground=\"{}\"><b>{}</b></span>",
-            color_hex,
-            glib::markup_escape_text(&msg.sender.name)
-        ));
-    } else {
-        sender_label.set_markup(&format!(
-            "<b>{}</b>",
-            glib::markup_escape_text(&msg.sender.name)
-        ));
-    }
-
-    // Set up timestamp
-    let timestamp = Label::new(Some(
-        &msg.server_timestamp
-            .with_timezone(&Local)
-            .format("%-I:%M:%S %p")
-            .to_string(),
-    ));
-    timestamp.add_css_class("dim-label");
-    timestamp.set_xalign(1.0);
-
-    header_box.append(&sender_label);
-    header_box.append(&timestamp);
-
-    // Use regex to split message into tokens (words and whitespace)
-    let re = Regex::new(r"(\s+|\S+)").unwrap();
-    let mut buffer = String::new();
-
-    let container = GtkBox::new(Orientation::Vertical, 2);
-    container.set_margin_top(4);
-    container.set_margin_bottom(4);
-    container.set_margin_start(8);
-    container.set_margin_end(8);
-    container.add_css_class("message-box");
 
     container.append(&header_box);
-
-    let message_box = GtkBox::new(Orientation::Horizontal, 2);
-    message_box.set_hexpand(true);
-    message_box.set_valign(gtk::Align::Start);
-    message_box.set_halign(gtk::Align::Start);
-    message_box.add_css_class("message-content");
     container.append(&message_box);
 
     let row = ListBoxRow::new();
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
-    // Create a RefCell to hold the MediaResourceManager for this row
-    let resource_manager = std::rc::Rc::new(std::cell::RefCell::new(MediaResourceManager::new()));
-    let resource_manager_clone_for_destroy = std::rc::Rc::clone(&resource_manager);
+    // Resource manager for this message
+    let resource_manager = Rc::new(RefCell::new(MessageResourceManager::new()));
+    let resource_manager_cleanup = Rc::clone(&resource_manager);
+
+    let re = Regex::new(r"(\s+|\S+)").unwrap();
+    let mut buffer = String::new();
 
     for cap in re.find_iter(&msg.message_text) {
         let word = cap.as_str();
         let word_trim = word.trim();
 
-        // Check if this word is an emote
         if !word_trim.is_empty() && emote_map.contains_key(word_trim) {
-            // Flush any accumulated text before adding the emote
             if !buffer.is_empty() {
                 let label = Label::new(Some(&buffer));
                 label.set_wrap(true);
@@ -624,33 +609,21 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
                 buffer.clear();
             }
 
-            // Get emote details
             let emote = &emote_map[word_trim];
-            let path = shellexpand::tilde(&emote.local_path).to_string();
+            let cached_emote = get_cached_emote(emote);
 
-            // Skip if file doesn't exist
-            if !Path::new(&path).exists() {
-                buffer.push_str(word);
-                continue;
-            }
-
-            // Create appropriate widget based on whether it's a GIF or static image
-            if emote.is_gif {
-                let gif_resource = GifMediaResource::new(&path);
-                message_box.append(&gif_resource.get_widget());
-                resource_manager.borrow_mut().add_resource(gif_resource);
+            if cached_emote.texture.is_some() {
+                let emote_widget = EmoteWidget::new(&cached_emote);
+                message_box.append(&emote_widget.get_widget());
+                resource_manager.borrow_mut().add_emote_widget(emote_widget);
             } else {
-                let static_resource = StaticImageResource::new(&path);
-                message_box.append(&static_resource.get_widget());
-                resource_manager.borrow_mut().add_resource(static_resource);
+                buffer.push_str(word);
             }
         } else {
-            // Accumulate regular text
             buffer.push_str(word);
         }
     }
 
-    // Flush any remaining text
     if !buffer.is_empty() {
         let label = Label::new(Some(&buffer));
         label.set_wrap(true);
@@ -660,12 +633,9 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         message_box.append(&label);
     }
 
-    // Clean up all media resources when the row is destroyed
+    // Cleanup resources when row is destroyed
     row.connect_destroy(move |_| {
-        let mut rm = resource_manager_clone_for_destroy.borrow_mut();
-        rm.resources.iter_mut().for_each(|res| res.cleanup());
-        rm.resources.clear();
-        println!("Message row destroyed, media resources cleaned up.");
+        resource_manager_cleanup.borrow_mut().cleanup();
     });
 
     // Apply CSS styling
@@ -703,18 +673,4 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     }
 
     row.upcast::<Widget>()
-}
-
-struct MediaResourceManager {
-    resources: Vec<Box<dyn MediaResource>>,
-}
-
-impl MediaResourceManager {
-    fn new() -> Self {
-        Self { resources: Vec::new() }
-    }
-
-    fn add_resource<T: MediaResource + 'static>(&mut self, resource: T) {
-        self.resources.push(Box::new(resource));
-    }
 }
