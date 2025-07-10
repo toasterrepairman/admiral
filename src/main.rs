@@ -91,7 +91,7 @@ fn build_ui(app: &Application) {
     main_label.set_css_classes(&["title-1"]);
     main_label.set_halign(Align::Center);
 
-    let subtitle_label = Label::new(Some("Click the widget in the top left corner"));
+    let subtitle_label = Label::new(Some("Type a channel name in the entry above"));
     subtitle_label.set_css_classes(&["dim-label"]);
     subtitle_label.set_halign(Align::Center);
 
