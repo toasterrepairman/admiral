@@ -4,22 +4,21 @@ use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button as GtkButton
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
-use tokio::sync::mpsc;
-use tokio::task;
 use glib::clone;
 use chrono::Local;
 use gio::SimpleAction;
 use std::collections::HashMap;
+use std::sync::mpsc::{self, TryRecvError};
+use std::thread;
 
 mod auth;
 mod emotes;
 use crate::emotes::{get_emote_map, parse_message, cleanup_emote_cache};
 use crate::auth::create_auth_window;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let app = Application::builder()
-        .application_id("Admiral")
+        .application_id("com.example.Admiral")
         .build();
 
     app.connect_activate(build_ui);
@@ -113,14 +112,14 @@ fn build_ui(app: &Application) {
 
     let message_list = Arc::new(Mutex::new(listbox.clone()));
     let stack_ref = Arc::new(Mutex::new(stack.clone()));
-    let (tx, mut rx) = mpsc::channel(100);
-    let (error_tx, mut error_rx) = mpsc::channel(10);
-    let active_task: Arc<Mutex<Option<task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let (tx, rx) = mpsc::channel();
+    let (error_tx, error_rx) = mpsc::channel();
+    let active_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
-    connect_button.connect_clicked(clone!(@strong message_list, @strong active_task, @strong stack_ref => move |_| {
-        // Abort any existing task
-        if let Some(handle) = active_task.lock().unwrap().take() {
-            handle.abort();
+    connect_button.connect_clicked(clone!(@strong message_list, @strong active_thread, @strong stack_ref => move |_| {
+        // Join any existing thread
+        if let Some(handle) = active_thread.lock().unwrap().take() {
+            handle.join().unwrap_or(());
         }
 
         // Clear existing messages
@@ -134,53 +133,69 @@ fn build_ui(app: &Application) {
         let error_tx = error_tx.clone();
         let message_list = message_list.clone();
 
-        let new_handle = task::spawn(async move {
-            let config = ClientConfig::default();
-            let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
+        let new_handle = thread::spawn(move || {
+            // Create a runtime for this thread only
+            let rt = Runtime::new().unwrap();
+            rt.block_on(async move {
+                let config = ClientConfig::default();
+                let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
 
-            if let Err(e) = client.join(channel) {
-                eprintln!("Failed to join channel: {}", e);
+                if let Err(e) = client.join(channel) {
+                    eprintln!("Failed to join channel: {}", e);
 
-                // Send error signal to main thread
-                let _ = error_tx.send(()).await;
+                    // Send error signal to main thread
+                    let _ = error_tx.send(());
+                    return;
+                }
 
-                return;
-            }
-
-            while let Some(message) = incoming_messages.recv().await {
-                if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    if tx.try_send(msg.clone()).is_err() {
-                        eprintln!("Dropped message due to full queue.");
+                while let Some(message) = incoming_messages.recv().await {
+                    if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
+                        if tx.send(msg.clone()).is_err() {
+                            eprintln!("Failed to send message");
+                            break;
+                        }
                     }
                 }
-            }
+            });
         });
 
-        *active_task.lock().unwrap() = Some(new_handle);
+        *active_thread.lock().unwrap() = Some(new_handle);
     }));
 
     // Message processing timer (100ms)
     glib::timeout_add_local(std::time::Duration::from_millis(100), clone!(@strong stack_ref => move || {
         // Handle connection errors
-        while let Ok(_) = error_rx.try_recv() {
-            stack_ref.lock().unwrap().set_visible_child_name("placeholder");
+        loop {
+            match error_rx.try_recv() {
+                Ok(_) => {
+                    stack_ref.lock().unwrap().set_visible_child_name("placeholder");
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
         }
 
         // Handle incoming messages
-        while let Ok(msg) = rx.try_recv() {
-            let channelid = &msg.channel_id;
-            let emote_map = get_emote_map(&channelid);
-            let row = parse_message(&msg, &emote_map);
-            let mut list = message_list.lock().unwrap();
-            list.prepend(&row);
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    let channelid = &msg.channel_id;
+                    let emote_map = get_emote_map(&channelid);
+                    let row = parse_message(&msg, &emote_map);
+                    let mut list = message_list.lock().unwrap();
+                    list.prepend(&row);
 
-            // Limit the number of displayed messages
-            let max_messages = 100;
-            let row_count = list.observe_children().n_items();
-            if row_count > max_messages as u32 {
-                if let Some(last_row) = list.last_child() {
-                    list.remove(&last_row);
+                    // Limit the number of displayed messages
+                    let max_messages = 100;
+                    let row_count = list.observe_children().n_items();
+                    if row_count > max_messages as u32 {
+                        if let Some(last_row) = list.last_child() {
+                            list.remove(&last_row);
+                        }
+                    }
                 }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
             }
         }
         glib::ControlFlow::Continue

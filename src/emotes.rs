@@ -102,7 +102,7 @@ struct ImageFile {
 // Lightweight emote widget that reuses cached resources
 struct EmoteWidget {
     widget: Picture,
-    _media_file: Option<MediaFile>, // Keep reference to prevent cleanup
+    media_file: Option<MediaFile>, // Keep reference to prevent cleanup
     popover: Popover,
 }
 
@@ -117,11 +117,22 @@ impl EmoteWidget {
         if let Some(ref texture) = cached_emote.texture {
             if cached_emote.is_gif {
                 // For GIFs, we need MediaFile for animation
-                let mf = MediaFile::for_filename(&cached_emote.path);
-                mf.set_loop(true);
-                picture.set_paintable(Some(&mf));
-                mf.play();
-                media_file = Some(mf);
+                // Create MediaFile and set it as the paintable
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    MediaFile::for_filename(&cached_emote.path)
+                })) {
+                    Ok(mf) => {
+                        mf.set_loop(true);
+                        picture.set_paintable(Some(&mf));
+                        // Start playing the media file
+                        mf.play();
+                        media_file = Some(mf);
+                    },
+                    Err(_) => {
+                        // Fallback to static texture if MediaFile creation fails
+                        picture.set_paintable(Some(texture));
+                    }
+                }
             } else {
                 // For static images, use the texture directly
                 picture.set_paintable(Some(texture));
@@ -149,7 +160,7 @@ impl EmoteWidget {
 
         Self {
             widget: picture,
-            _media_file: media_file,
+            media_file,
             popover,
         }
     }
@@ -178,10 +189,15 @@ impl MessageResourceManager {
     fn cleanup(&mut self) {
         // Explicit cleanup of MediaFile resources
         for emote_widget in &mut self.emote_widgets {
-            if let Some(ref media_file) = emote_widget._media_file {
+            if let Some(ref media_file) = emote_widget.media_file {
+                // Safely stop the media file before clearing the paintable
                 if media_file.is_playing() {
                     media_file.pause();
                 }
+
+                // Wait a bit to ensure the media file has stopped
+                std::thread::sleep(std::time::Duration::from_millis(10));
+
                 // Clear the paintable to free VRAM
                 emote_widget.widget.set_paintable(None::<&gdk::Paintable>);
             }
@@ -192,7 +208,7 @@ impl MessageResourceManager {
     }
 }
 
-// Get cached emote or load it
+// Get cached emote or load it - with MediaFile caching to avoid multiple instances
 fn get_cached_emote(emote: &Emote) -> Arc<CachedEmote> {
     let cache_key = format!("{}:{}", emote.name, emote.local_path);
 
@@ -658,7 +674,10 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     // Cleanup resources when row is destroyed
     row.connect_destroy(move |_| {
-        resource_manager_cleanup.borrow_mut().cleanup();
+        // Use catch_unwind to prevent segfaults during cleanup
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resource_manager_cleanup.borrow_mut().cleanup();
+        }));
     });
 
     // Apply CSS styling
