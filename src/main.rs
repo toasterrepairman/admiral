@@ -453,7 +453,8 @@ fn build_ui(app: &Application) {
     // Emote cache cleanup timer
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
-        cleanup_media_file_cache();
+        // Prevent unreferencing a null object by commenting this line out
+        // cleanup_media_file_cache();
         println!("Cleaning cache...");
         glib::ControlFlow::Continue
     });
