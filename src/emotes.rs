@@ -121,8 +121,15 @@ struct EmoteWidget {
 impl EmoteWidget {
     fn new(cached_emote: &Arc<CachedEmote>) -> Self {
         let picture = Picture::new();
-        picture.set_size_request(-0, 28);
-        picture.set_can_shrink(false);
+
+        // Set fixed size for consistent line height
+        picture.set_size_request(28, 28); // Square emotes with consistent sizing
+
+        // Ensure emotes don't shrink or expand unexpectedly
+        picture.set_hexpand(false);
+        picture.set_vexpand(false);
+        picture.set_halign(gtk::Align::Center);
+        picture.set_valign(gtk::Align::Center);
 
         let mut media_file_key = None;
 
@@ -249,45 +256,45 @@ impl MessageResourceManager {
     }
 
     fn cleanup(&mut self) {
-            // Don't schedule anything - do cleanup synchronously
-            // We're already on the main thread during widget destruction
+        // Don't schedule anything - do cleanup synchronously
+        // We're already on the main thread during widget destruction
 
-            for key in self.emote_widgets.iter().filter_map(|w| w.media_file_key.as_ref()) {
-                // Direct cleanup without scheduling
-                let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-                    let mut counts = ref_counts.borrow_mut();
-                    if let Some(count) = counts.get_mut(key.as_str()) {
-                        if *count > 0 {
-                            *count -= 1;
-                        }
-                        *count == 0
-                    } else {
-                        false
+        for key in self.emote_widgets.iter().filter_map(|w| w.media_file_key.as_ref()) {
+            // Direct cleanup without scheduling
+            let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+                let mut counts = ref_counts.borrow_mut();
+                if let Some(count) = counts.get_mut(key.as_str()) {
+                    if *count > 0 {
+                        *count -= 1;
+                    }
+                    *count == 0
+                } else {
+                    false
+                }
+            });
+
+            if should_remove {
+                MEDIA_FILE_CACHE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    if let Some(media_file) = cache.remove(key.as_str()) {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if media_file.is_playing() {
+                                media_file.pause();
+                            }
+                            media_file.set_file(None::<&gio::File>);
+                        }));
                     }
                 });
-
-                if should_remove {
-                    MEDIA_FILE_CACHE.with(|cache| {
-                        let mut cache = cache.borrow_mut();
-                        if let Some(media_file) = cache.remove(key.as_str()) {
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                if media_file.is_playing() {
-                                    media_file.pause();
-                                }
-                                media_file.set_file(None::<&gio::File>);
-                            }));
-                        }
-                    });
-                }
-            }
-
-            // Cleanup popovers
-            for emote_widget in self.emote_widgets.drain(..) {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    emote_widget.popover.unparent();
-                }));
             }
         }
+
+        // Cleanup popovers
+        for emote_widget in self.emote_widgets.drain(..) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                emote_widget.popover.unparent();
+            }));
+        }
+    }
 }
 
 // Get cached emote or load it
@@ -708,14 +715,17 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     header_box.append(&sender_label);
     header_box.append(&timestamp);
 
-    let message_box = GtkBox::new(Orientation::Horizontal, 2);
-    message_box.set_hexpand(true);
-    message_box.set_valign(gtk::Align::Start);
-    message_box.set_halign(gtk::Align::Start);
-    message_box.add_css_class("message-content");
+    // Use a FlowBox for better handling of mixed content (text + emotes)
+    let message_flowbox = gtk::FlowBox::new();
+    message_flowbox.set_hexpand(true);
+    message_flowbox.set_valign(gtk::Align::Start);
+    message_flowbox.set_halign(gtk::Align::Start);
+    message_flowbox.set_row_spacing(2);
+    message_flowbox.set_column_spacing(2);
+    message_flowbox.add_css_class("message-content");
 
     container.append(&header_box);
-    container.append(&message_box);
+    container.append(&message_flowbox);
 
     let row = ListBoxRow::new();
     row.set_child(Some(&container));
@@ -725,6 +735,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     let resource_manager = Rc::new(RefCell::new(MessageResourceManager::new()));
     let resource_manager_cleanup = Rc::clone(&resource_manager);
 
+    // Process message text
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
 
@@ -734,21 +745,29 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
         if !word_trim.is_empty() && emote_map.contains_key(word_trim) {
             if !buffer.is_empty() {
+                // Create a label for the text portion
                 let label = Label::new(Some(&buffer));
                 label.set_wrap(true);
                 label.add_css_class("message-text");
                 label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                 label.set_xalign(0.0);
-                message_box.append(&label);
+                label.set_halign(gtk::Align::Start);
+                label.set_valign(gtk::Align::Center);
+
+                // Add the text label to the flowbox
+                let label_container = gtk::Box::new(Orientation::Horizontal, 0);
+                label_container.append(&label);
+                message_flowbox.append(&label_container);
                 buffer.clear();
             }
 
+            // Add the emote
             let emote = &emote_map[word_trim];
             let cached_emote = get_cached_emote(emote);
 
             if cached_emote.texture.is_some() {
                 let emote_widget = EmoteWidget::new(&cached_emote);
-                message_box.append(&emote_widget.get_widget());
+                message_flowbox.append(&emote_widget.get_widget());
                 resource_manager.borrow_mut().add_emote_widget(emote_widget);
             } else {
                 buffer.push_str(word);
@@ -764,7 +783,12 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         label.add_css_class("message-text");
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_xalign(0.0);
-        message_box.append(&label);
+        label.set_halign(gtk::Align::Start);
+        label.set_valign(gtk::Align::Center);
+
+        let label_container = gtk::Box::new(Orientation::Horizontal, 0);
+        label_container.append(&label);
+        message_flowbox.append(&label_container);
     }
 
     // Cleanup resources when row is destroyed
@@ -790,6 +814,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         }
         .message-text {
             font-size: 12pt;
+            line-height: 28px; /* Consistent line height matching emote size */
         }
         .dim-label {
             color: alpha(#aaa, 0.8);
@@ -802,6 +827,10 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             font-family: monospace;
             font-size: 11pt;
             padding: 4px 8px;
+        }
+        .flowbox-child {
+            margin: 0;
+            padding: 0;
         }
         ",
     );
