@@ -96,7 +96,7 @@ fn build_ui(app: &Application) {
 
     let tab_bar = TabBar::builder()
         .view(&tab_view)
-        .autohide(false) // Set to true if you prefer it to hide when only one tab exists
+        .autohide(true) // Set to true to autohide when only one tab exists
         .build();
     // Apply the 'inline' style class to make it blend with the HeaderBar
     tab_bar.add_css_class("inline");
@@ -265,6 +265,16 @@ fn build_ui(app: &Application) {
     window.add_action(&quit_action);
 
     app.set_accels_for_action("win.quit", &["<Control>q"]);
+
+    // Start monitoring tab count to control tab bar visibility
+    let tab_view_monitor = tab_view.clone();
+    let tab_bar_monitor = tab_bar.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        let n_pages = tab_view_monitor.n_pages();
+        // The TabBar's autohide property will handle visibility automatically
+        // when set to true, it hides if there's only one page
+        glib::ControlFlow::Continue
+    });
 
     window.present();
 }
