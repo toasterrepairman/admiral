@@ -146,8 +146,13 @@ fn remove_favorite(channel: &str) {
     favorites.channels.retain(|c| c != channel);
     save_favorites(&favorites);
 }
-
-fn load_and_display_favorites(list: &ListBox, favorites_entry: &Entry, favorites_list: &ListBox) {
+fn load_and_display_favorites(
+    list: &ListBox,
+    favorites_entry: &Entry,
+    favorites_list: &ListBox,
+    tab_view: &TabView,
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
+) {
     // Clear existing items
     list.remove_all();
 
@@ -155,9 +160,10 @@ fn load_and_display_favorites(list: &ListBox, favorites_entry: &Entry, favorites
 
     // Iterate over a reference to avoid moving the vector
     for channel in &favorites.channels {
-        // Create a row for each favorite - this implements the ActionRow as requested [[8]]
+        // Create a row for each favorite
         let row = adw::ActionRow::builder()
             .title(channel)
+            .activatable(true) // Make the row clickable
             .build();
 
         // Star button (already favorited, so this will be for un-favoriting)
@@ -179,21 +185,51 @@ fn load_and_display_favorites(list: &ListBox, favorites_entry: &Entry, favorites
 
         // Add the buttons to the row
         row.add_suffix(&buttons_box);
-        row.set_activatable(false); // Prevent row from being clickable
+
+        // Connect the row click to open a new tab with this channel
+        let channel_clone = channel.clone();
+        let tab_view_clone = tab_view.clone();
+        let tabs_clone = tabs.clone();
+        row.connect_activated(move |_| {
+            // Create a new tab with the channel name
+            create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
+
+            // After creating the tab, we need to trigger the connection
+            // We'll use a small timeout to ensure the tab is fully created
+            glib::timeout_add_local_once(std::time::Duration::from_millis(50), clone!(@strong channel_clone, @strong tab_view_clone, @strong tabs_clone => move || {
+                // Find the newly created tab
+                if let Some(page) = tab_view_clone.selected_page() {
+                    // Get the tab data for this page
+                    let tabs_map = tabs_clone.lock().unwrap();
+                    for (_, tab_data) in tabs_map.iter() {
+                        // This is a bit hacky - we're checking if the page matches
+                        // A better approach would be to store a reference to the tab_data when creating the tab
+                        if tab_data.page == page {
+                            // Set the entry text to the channel name
+                            tab_data.entry.set_text(&channel_clone);
+                            // Trigger the connect button
+                            tab_data.entry.emit_activate();
+                            break;
+                        }
+                    }
+                }
+                // No return value needed for timeout_add_local_once
+            }));
+        });
 
         // Connect the buttons
-        let channel_clone = channel.clone(); // Clone the string for the closure
+        let channel_clone = channel.clone();
         let favorites_list_clone = favorites_list.clone();
-        star_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry => move |_| {
+        star_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
             remove_favorite(&channel_clone);
-            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone);
+            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
         }));
 
-        let channel_clone = channel.clone(); // Clone the string for the closure
+        let channel_clone = channel.clone();
         let favorites_list_clone = favorites_list.clone();
-        trash_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry => move |_| {
+        trash_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
             remove_favorite(&channel_clone);
-            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone);
+            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
         }));
 
         list.append(&row);
@@ -333,14 +369,15 @@ fn build_ui(app: &Application) {
     }));
 
     // Favorites button handlers
+    let tabs_clone = tabs.clone();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
-    add_favorite_button.connect_clicked(clone!(@strong favorites_list_clone, @strong favorites_entry_clone => move |_| {
+    add_favorite_button.connect_clicked(clone!(@strong favorites_list_clone, @strong favorites_entry_clone, @strong tab_view, @strong tabs_clone => move |_| {
         let channel = favorites_entry_clone.text().to_string();
         if !channel.is_empty() {
             add_favorite(&channel);
             favorites_entry_clone.set_text("");
-            load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone);
+            load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone, &tab_view, &tabs_clone);
         }
     }));
 
@@ -350,7 +387,7 @@ fn build_ui(app: &Application) {
     }));
 
     // Load initial favorites
-    load_and_display_favorites(&favorites_list, &favorites_entry, &favorites_list);
+    load_and_display_favorites(&favorites_list, &favorites_entry, &favorites_list, &tab_view, &tabs);
 
     // Overview button handler
     overview_button.connect_clicked(clone!(@strong tab_overview => move |_| {
