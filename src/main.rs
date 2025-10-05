@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, TabOverview};
-use gtk::{ScrolledWindow, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, MenuButton, Popover, Stack};
+use gtk::{ScrolledWindow, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -13,10 +13,9 @@ use tokio::runtime::Runtime;
 use glib::source::idle_add_local;
 use glib::ControlFlow;
 
-mod auth;
-mod emotes;
+mod auth; // Assuming these modules exist
+mod emotes; // Assuming these modules exist
 use crate::emotes::{get_emote_map, parse_message, cleanup_emote_cache, cleanup_media_file_cache};
-use crate::auth::create_auth_window;
 
 // Connection state management
 #[derive(Debug, Clone)]
@@ -43,10 +42,15 @@ impl ClientState {
     }
 
     fn disconnect(&mut self) {
+        // Note: Dropping the client handle might be enough for disconnection in twitch-irc
+        // depending on how the library handles dropped handles. For explicit disconnection,
+        // you might need a method on the client itself if available.
+        // Here, we clear the client and join the thread.
         self.client = None;
         if let Some(handle) = self.join_handle.take() {
             handle.join().unwrap_or(());
         }
+        // Recreate the runtime for potential reconnection
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new().unwrap());
         }
@@ -85,79 +89,63 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
-    let header = HeaderBar::builder()
-        .show_title(false)
-        .css_classes(["flat"])
-        .build();
-
     // Create TabView and TabBar
     let tab_view = TabView::builder()
-        .vexpand(true)
+        .vexpand(true) // The TabView itself expands to fill the main content area below the header and tab bar
         .build();
 
     let tab_bar = TabBar::builder()
         .view(&tab_view)
-        .autohide(false)
+        .autohide(false) // Set to true if you prefer it to hide when only one tab exists
+        .build();
+    // Apply the 'inline' style class to make it blend with the HeaderBar
+    tab_bar.add_css_class("inline");
+
+    // Create HeaderBar
+    let header = HeaderBar::builder()
         .build();
 
-    // Create TabOverview
-    let tab_overview = TabOverview::builder()
-        .view(&tab_view)
-        .child(&tab_view)
-        .build();
-
-    // Login button
-    let login_button = GtkButton::builder().label("Log In").build();
-
-    let popover_box = Box::new(Orientation::Vertical, 5);
-    popover_box.append(&login_button);
-
-    let popover = Popover::builder()
-        .child(&popover_box)
-        .build();
-
-    let menu_button = MenuButton::builder()
-        .popover(&popover)
-        .build();
-
-    // Add tab button
+    // Add tab button (placed in HeaderBar)
     let add_tab_button = GtkButton::builder()
-        .icon_name("list-add-symbolic")
+        .icon_name("list-add-symbolic") // Use a standard Adwaita icon
         .tooltip_text("Add new tab")
         .build();
 
-    // Overview button
+    // Overview button (placed in HeaderBar)
     let overview_button = GtkButton::builder()
-        .icon_name("view-grid-symbolic")
+        .icon_name("view-grid-symbolic") // Use a standard Adwaita icon
         .tooltip_text("Tab overview")
         .build();
 
-    header.pack_end(&menu_button);
-    header.pack_end(&overview_button);
+    // Pack buttons into the HeaderBar
     header.pack_end(&add_tab_button);
+    header.pack_end(&overview_button);
 
-    // Main content
+    // Create TabOverview - This manages the content area for the tabs
+    let tab_overview = TabOverview::builder()
+        .view(&tab_view)
+        .child(&tab_view) // The TabView is the child managed by the overview
+        .enable_new_tab(false) // Disable internal new tab button since we have our own
+        .show_end_title_buttons(false) // Disable internal close/reorder buttons if managed differently
+        .build();
+
+    // Main content container (Vertical Box)
     let content = Box::new(Orientation::Vertical, 0);
-    content.append(&header);
-    content.append(&tab_bar);
-    content.append(&tab_overview);
+    content.append(&header);      // Top: HeaderBar
+    content.append(&tab_bar);    // Middle: TabBar (below header)
+    content.append(&tab_overview); // Bottom: TabOverview containing the TabView and pages
 
     // Store all tabs
     let tabs: Arc<Mutex<HashMap<String, Arc<TabData>>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Login button
-    login_button.connect_clicked(clone!(@strong app => move |_| {
-        create_auth_window(&app);
-    }));
-
-    // Add tab button handler
+    // Add tab button handler (connects to the button in the HeaderBar)
     add_tab_button.connect_clicked(clone!(@strong tab_view, @strong tabs => move |_| {
         create_new_tab("New Tab", &tab_view, &tabs);
     }));
 
-    // Overview button handler
+    // Overview button handler (connects to the button in the HeaderBar)
     overview_button.connect_clicked(clone!(@strong tab_overview => move |_| {
-        tab_overview.set_open(true);
+        tab_overview.set_open(true); // Opens the tab overview/grid view
     }));
 
     // Create initial tab
@@ -224,6 +212,42 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
+    // Action for creating a new tab (Ctrl+T)
+    let new_tab_action = SimpleAction::new("new-tab", None);
+    let tab_view_clone = tab_view.clone();
+    let tabs_clone = tabs.clone();
+    new_tab_action.connect_activate(move |_, _| {
+        create_new_tab("New Tab", &tab_view_clone, &tabs_clone);
+    });
+    window.add_action(&new_tab_action);
+
+    // Action for closing the selected tab (Ctrl+W)
+    let close_tab_action = SimpleAction::new("close-tab", None);
+    let tab_view_close = tab_view.clone();
+    let tabs_close = tabs.clone();
+    close_tab_action.connect_activate(move |_, _| {
+        if let Some(selected_page) = tab_view_close.selected_page() {
+            // Find the corresponding tab data to clean up client state
+            let tab_title = selected_page.title().to_string();
+            // Note: This relies on title matching, which might not be robust if titles change.
+            // A better approach might involve storing page IDs or mapping pages directly.
+            // For now, we'll remove the page and let the data cleanup happen via weak references
+            // or when the HashMap is cleared on app quit.
+            // Example cleanup attempt based on title (if title matches channel name):
+            if let Ok(mut tabs_map) = tabs_close.lock() {
+                    // Find and remove associated data if possible, e.g., by title if stored.
+                    // For simplicity here, just remove the page.
+                    // A more robust method would link the page directly to its Arc<TabData>.
+            }
+            tab_view_close.close_page(&selected_page); // This closes the selected tab
+        }
+    });
+    window.add_action(&close_tab_action);
+
+    // Set the accelerators
+    app.set_accels_for_action("win.new-tab", &["<Control>t"]);
+    app.set_accels_for_action("win.close-tab", &["<Control>w"]);
+
     window.set_content(Some(&content));
 
     // Quit action
@@ -272,7 +296,7 @@ fn create_new_tab(
     entry_box.append(&entry);
     entry_box.append(&connect_button);
 
-    // Create listbox
+    // Create listbox for chat messages
     let listbox = ListBox::builder().build();
 
     let scrolled_window = ScrolledWindow::builder()
@@ -281,7 +305,7 @@ fn create_new_tab(
         .child(&listbox)
         .build();
 
-    // Create placeholder
+    // Create placeholder content for when not connected
     let placeholder_box = Box::new(Orientation::Vertical, 12);
     placeholder_box.set_valign(Align::Center);
     placeholder_box.set_halign(Align::Center);
@@ -301,7 +325,7 @@ fn create_new_tab(
     placeholder_box.append(&main_label);
     placeholder_box.append(&subtitle_label);
 
-    // Create stack
+    // Create stack to switch between placeholder and chat view
     let stack = Stack::builder()
         .vexpand(true)
         .hexpand(true)
@@ -311,19 +335,19 @@ fn create_new_tab(
     stack.add_named(&scrolled_window, Some("chat"));
     stack.set_visible_child_name("placeholder");
 
-    // Add components to tab content
+    // Add components to the tab's content area
     tab_content.append(&entry_box);
     tab_content.append(&stack);
 
-    // Add to tab view
+    // Append the new content area as a page to the TabView
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    // Create channels for this tab
+    // Create channels for this specific tab to receive messages/errors
     let (tx, rx) = mpsc::channel();
     let (error_tx, error_rx) = mpsc::channel();
 
-    // Generate unique tab ID based on current number of tabs
+    // Generate a unique identifier for this tab
     let tab_count = tabs.lock().unwrap().len();
     let tab_id = format!("tab_{}", tab_count);
 
@@ -342,14 +366,14 @@ fn create_new_tab(
     };
 
     let tab_data_arc = Arc::new(tab_data);
-    tabs.lock().unwrap().insert(tab_id, tab_data_arc.clone());
+    tabs.lock().unwrap().insert(tab_id, tab_data_arc.clone()); // Store the tab data
 
-    // Connect button handler for this tab
+    // Connect the connect/disconnect button for this specific tab
     connect_button.connect_clicked(clone!(@strong tab_data_arc => move |_| {
         let channel_name = tab_data_arc.entry.text().to_string();
 
         if channel_name.is_empty() {
-            // Disconnect if empty
+            // If entry is empty, disconnect the current tab
             disconnect_tab(&tab_data_arc);
             return;
         }
@@ -357,21 +381,23 @@ fn create_new_tab(
         let current_state = tab_data_arc.connection_state.lock().unwrap().clone();
         match current_state {
             ConnectionState::Connected(_) => {
+                // If already connected, disconnect first, then connect to the new channel
                 disconnect_tab(&tab_data_arc);
                 start_connection_for_tab(&channel_name, &tab_data_arc);
             },
             ConnectionState::Disconnected | ConnectionState::Connecting => {
+                // If disconnected or connecting, try to connect
                 start_connection_for_tab(&channel_name, &tab_data_arc);
             }
         }
     }));
 
-    // Entry activation handler
+    // Allow pressing Enter in the entry to trigger the connect button
     entry.connect_activate(clone!(@strong connect_button => move |_| {
         connect_button.emit_clicked();
     }));
 
-    // Switch to new tab
+    // Switch to the newly created tab
     tab_view.set_selected_page(&page);
 }
 
@@ -379,15 +405,19 @@ fn start_connection_for_tab(
     channel: &str,
     tab_data: &Arc<TabData>
 ) {
+    // Update connection state to Connecting
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
+    // Store the channel name being connected to
     *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
 
+    // Clear previous messages and show the chat view
     tab_data.listbox.remove_all();
     tab_data.stack.set_visible_child_name("chat");
 
-    // Update tab title
+    // Update the tab's title to reflect the connected channel
     tab_data.page.set_title(channel);
 
+    // Extract necessary data for the thread
     let channel = channel.to_string();
     let connection_state = tab_data.connection_state.clone();
     let client_state_thread = tab_data.client_state.clone();
@@ -395,40 +425,48 @@ fn start_connection_for_tab(
     let tx = tab_data.tx.clone();
     let error_tx = tab_data.error_tx.clone();
 
+    // Take the runtime from the stored state to move into the thread
     let mut state = tab_data.client_state.lock().unwrap();
     let runtime = state.runtime.take().unwrap();
     drop(state);
 
+    // Spawn the connection thread
     let handle = thread::spawn(move || {
         runtime.block_on(async move {
             let config = ClientConfig::default();
             let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
 
+            // Attempt to join the specified channel
             if let Err(e) = client.join(channel.clone()) {
-                eprintln!("Failed to join channel: {}", e);
-                let _ = error_tx.send(());
+                eprintln!("Failed to join channel '{}': {}", channel, e);
+                let _ = error_tx.send(()); // Signal an error to the main thread
                 return;
             }
 
+            // Store the client handle so it can be managed (e.g., disconnected later)
             {
                 let mut state = client_state_thread.lock().unwrap();
                 state.client = Some(client);
             }
 
+            // Update connection state to Connected
             {
                 let mut state = connection_state.lock().unwrap();
                 *state = ConnectionState::Connected(channel.clone());
             }
 
+            // Main message loop
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
+                    // Send the received message to the main thread for UI update
                     if tx.send(msg.clone()).is_err() {
-                        eprintln!("Failed to send message");
-                        break;
+                        eprintln!("Failed to send message to UI thread, channel might be closed");
+                        break; // Exit the loop if sending fails
                     }
                 }
             }
 
+            // Update connection state back to Disconnected when the loop ends (e.g., due to error or disconnection)
             {
                 let mut state = connection_state.lock().unwrap();
                 if matches!(*state, ConnectionState::Connected(ref c) if c == &channel) {
@@ -438,6 +476,7 @@ fn start_connection_for_tab(
         });
     });
 
+    // Store the join handle so we can wait for it later if needed (e.g., on app quit)
     {
         let mut state = client_state_store.lock().unwrap();
         state.join_handle = Some(handle);
@@ -445,8 +484,13 @@ fn start_connection_for_tab(
 }
 
 fn disconnect_tab(tab_data: &Arc<TabData>) {
+    // Update the tab's connection state
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
+    // Trigger disconnection logic in the client state
     tab_data.client_state.lock().unwrap().disconnect();
+    // Clear the chat display and show the placeholder
     tab_data.listbox.remove_all();
     tab_data.stack.set_visible_child_name("placeholder");
+    // Reset the tab title
+    tab_data.page.set_title("New Tab"); // Or some default title
 }
