@@ -228,50 +228,8 @@ fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
     Some(media_file)
 }
 
-// --- release_media_file (tear down pipeline before removing) ---
 fn release_media_file(key: &str) {
-    // MUST run on main thread
-    debug_assert!(
-        glib::MainContext::default().is_owner(),
-        "release_media_file MUST be called from the main (GTK) thread"
-    );
-
-    let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-        let mut counts = ref_counts.borrow_mut();
-        if let Some(count) = counts.get_mut(key) {
-            *count -= 1;
-            if *count == 0 {
-                counts.remove(key);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    });
-
-    if should_remove {
-        MEDIA_FILE_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if let Some(media_file) = cache.get(key) {
-                // Try to stop playback if playing
-                if media_file.is_playing() {
-                    // set playing = false
-                    media_file.set_property("playing", &false);
-                }
-
-                // IMPORTANT: clear the file so the underlying MediaStream (and GStreamer pipeline)
-                // can be torn down and free memory/resources.
-                // Use set_file(None) via gio::File
-                media_file.set_file(None::<&gio::File>);
-                // also attempt to clear filename, to be safe
-                media_file.set_filename(None::<&std::path::Path>);
-            }
-            // finally remove from cache so the GObject ref can drop
-            cache.remove(key);
-        });
-    }
+    // noop
 }
 
 // Resource manager for cleanup - only handles popovers now
@@ -291,20 +249,45 @@ impl MessageResourceManager {
     }
 
     fn cleanup(&mut self) {
-        // Release MediaFile references
-        for emote_widget in &self.emote_widgets {
-            if let Some(ref key) = emote_widget.media_file_key {
-                release_media_file(key);
+            // Don't schedule anything - do cleanup synchronously
+            // We're already on the main thread during widget destruction
+
+            for key in self.emote_widgets.iter().filter_map(|w| w.media_file_key.as_ref()) {
+                // Direct cleanup without scheduling
+                let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+                    let mut counts = ref_counts.borrow_mut();
+                    if let Some(count) = counts.get_mut(key.as_str()) {
+                        if *count > 0 {
+                            *count -= 1;
+                        }
+                        *count == 0
+                    } else {
+                        false
+                    }
+                });
+
+                if should_remove {
+                    MEDIA_FILE_CACHE.with(|cache| {
+                        let mut cache = cache.borrow_mut();
+                        if let Some(media_file) = cache.remove(key.as_str()) {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                if media_file.is_playing() {
+                                    media_file.pause();
+                                }
+                                media_file.set_file(None::<&gio::File>);
+                            }));
+                        }
+                    });
+                }
+            }
+
+            // Cleanup popovers
+            for emote_widget in self.emote_widgets.drain(..) {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    emote_widget.popover.unparent();
+                }));
             }
         }
-
-        // Only cleanup popovers since MediaFiles are shared globally
-        for emote_widget in &mut self.emote_widgets {
-            // Unparent the popover to clean up
-            emote_widget.popover.unparent();
-        }
-        self.emote_widgets.clear();
-    }
 }
 
 // Get cached emote or load it
@@ -353,11 +336,14 @@ pub fn cleanup_emote_cache() {
 
 // Cleanup MediaFile cache - remove unused MediaFiles
 pub fn cleanup_media_file_cache() {
-    MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-        let keys_to_remove: Vec<_> = ref_counts.borrow().keys().cloned().collect();
-        for key in keys_to_remove {
-            release_media_file(&key);
-        }
+    // Schedule cleanup to happen on main thread
+    glib::idle_add_local_once(|| {
+        MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+            let keys_to_remove: Vec<_> = ref_counts.borrow().keys().cloned().collect();
+            for key in keys_to_remove {
+                release_media_file(&key);
+            }
+        });
     });
 }
 

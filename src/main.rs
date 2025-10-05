@@ -1,19 +1,17 @@
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, HeaderBar};
-use gtk::{ScrolledWindow, ListBox, ListBoxRow, Label, Entry, Button as GtkButton, Orientation, Box, Align, Widget, MenuButton, Popover, Stack};
+use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, TabOverview};
+use gtk::{ScrolledWindow, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, MenuButton, Popover, Stack};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
 use glib::clone;
-use chrono::Local;
 use gio::SimpleAction;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, TryRecvError, Receiver};
+use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 use tokio::runtime::Runtime;
 use glib::source::idle_add_local;
 use glib::ControlFlow;
-use glib::ControlFlow::Continue;
 
 mod auth;
 mod emotes;
@@ -45,19 +43,29 @@ impl ClientState {
     }
 
     fn disconnect(&mut self) {
-        // Drop the client to disconnect
         self.client = None;
-
-        // Join the thread if it exists
         if let Some(handle) = self.join_handle.take() {
             handle.join().unwrap_or(());
         }
-
-        // Recreate runtime if needed
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new().unwrap());
         }
     }
+}
+
+// Tab data structure
+struct TabData {
+    page: TabPage,
+    listbox: ListBox,
+    stack: Stack,
+    entry: Entry,
+    channel_name: Arc<Mutex<Option<String>>>,
+    client_state: Arc<Mutex<ClientState>>,
+    connection_state: Arc<Mutex<ConnectionState>>,
+    tx: std::sync::mpsc::Sender<twitch_irc::message::PrivmsgMessage>,
+    rx: Arc<Mutex<std::sync::mpsc::Receiver<twitch_irc::message::PrivmsgMessage>>>,
+    error_tx: std::sync::mpsc::Sender<()>,
+    error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
 fn main() {
@@ -73,21 +81,35 @@ fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Admiral")
-        .default_width(500)
+        .default_width(700)
         .default_height(600)
         .build();
 
     let header = HeaderBar::builder()
-        .show_title(true)
+        .show_title(false)
         .css_classes(["flat"])
         .build();
 
-    let entry = Entry::builder().placeholder_text("Enter channel name").build();
-    let connect_button = GtkButton::builder().label("Connect").build();
+    // Create TabView and TabBar
+    let tab_view = TabView::builder()
+        .vexpand(true)
+        .build();
+
+    let tab_bar = TabBar::builder()
+        .view(&tab_view)
+        .autohide(false)
+        .build();
+
+    // Create TabOverview
+    let tab_overview = TabOverview::builder()
+        .view(&tab_view)
+        .child(&tab_view)
+        .build();
+
+    // Login button
     let login_button = GtkButton::builder().label("Log In").build();
 
     let popover_box = Box::new(Orientation::Vertical, 5);
-    popover_box.append(&connect_button);
     popover_box.append(&login_button);
 
     let popover = Popover::builder()
@@ -98,30 +120,168 @@ fn build_ui(app: &Application) {
         .popover(&popover)
         .build();
 
-    let content = Box::new(Orientation::Vertical, 0);
+    // Add tab button
+    let add_tab_button = GtkButton::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add new tab")
+        .build();
 
-    header.pack_start(&entry);
+    // Overview button
+    let overview_button = GtkButton::builder()
+        .icon_name("view-grid-symbolic")
+        .tooltip_text("Tab overview")
+        .build();
+
     header.pack_end(&menu_button);
+    header.pack_end(&overview_button);
+    header.pack_end(&add_tab_button);
 
-    entry.connect_activate(clone!(@strong connect_button => move |_| {
-        connect_button.emit_clicked();
-    }));
+    // Main content
+    let content = Box::new(Orientation::Vertical, 0);
+    content.append(&header);
+    content.append(&tab_bar);
+    content.append(&tab_overview);
 
+    // Store all tabs
+    let tabs: Arc<Mutex<HashMap<String, Arc<TabData>>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    // Login button
     login_button.connect_clicked(clone!(@strong app => move |_| {
         create_auth_window(&app);
     }));
 
-    let listbox = ListBox::builder()
+    // Add tab button handler
+    add_tab_button.connect_clicked(clone!(@strong tab_view, @strong tabs => move |_| {
+        create_new_tab("New Tab", &tab_view, &tabs);
+    }));
+
+    // Overview button handler
+    overview_button.connect_clicked(clone!(@strong tab_overview => move |_| {
+        tab_overview.set_open(true);
+    }));
+
+    // Create initial tab
+    create_new_tab("Tab 1", &tab_view, &tabs);
+
+    // Message processing timer
+    let tabs_clone = tabs.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        let tabs_map = tabs_clone.lock().unwrap();
+
+        for (_, tab_data) in tabs_map.iter() {
+            // Handle errors
+            let error_rx = tab_data.error_rx.lock().unwrap();
+            loop {
+                match error_rx.try_recv() {
+                    Ok(_) => {
+                        drop(error_rx);
+                        disconnect_tab(tab_data);
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
+
+            // Handle messages
+            let rx = tab_data.rx.lock().unwrap();
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => {
+                        let channelid = msg.channel_id.clone();
+                        let emote_map = get_emote_map(&channelid);
+                        let listbox = tab_data.listbox.clone();
+
+                        idle_add_local(move || {
+                            let row = parse_message(&msg, &emote_map);
+                            listbox.prepend(&row);
+
+                            let max_messages = 100;
+                            let row_count = listbox.observe_children().n_items();
+                            if row_count > max_messages as u32 {
+                                if let Some(last_row) = listbox.last_child() {
+                                    listbox.remove(&last_row);
+                                }
+                            }
+
+                            ControlFlow::Break
+                        });
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+
+        glib::ControlFlow::Continue
+    });
+
+    // Emote cache cleanup timer
+    glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
+        cleanup_emote_cache();
+        cleanup_media_file_cache();
+        println!("Cleaning cache...");
+        glib::ControlFlow::Continue
+    });
+
+    window.set_content(Some(&content));
+
+    // Quit action
+    let quit_action = SimpleAction::new("quit", None);
+    let window_clone = window.clone();
+    let tabs_quit = tabs.clone();
+
+    quit_action.connect_activate(move |_, _| {
+        let tabs_map = tabs_quit.lock().unwrap();
+        for (_, tab_data) in tabs_map.iter() {
+            disconnect_tab(tab_data);
+        }
+        window_clone.close();
+    });
+    window.add_action(&quit_action);
+
+    app.set_accels_for_action("win.quit", &["<Control>q"]);
+
+    window.present();
+}
+
+fn create_new_tab(
+    label: &str,
+    tab_view: &TabView,
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
+) {
+    // Create the tab content container
+    let tab_content = Box::new(Orientation::Vertical, 0);
+
+    // Create entry and connect button for this tab
+    let entry_box = Box::new(Orientation::Horizontal, 6);
+    entry_box.set_margin_top(6);
+    entry_box.set_margin_bottom(6);
+    entry_box.set_margin_start(6);
+    entry_box.set_margin_end(6);
+
+    let entry = Entry::builder()
+        .placeholder_text("Enter channel name")
+        .hexpand(true)
         .build();
+
+    let connect_button = GtkButton::builder()
+        .label("Connect")
+        .build();
+
+    entry_box.append(&entry);
+    entry_box.append(&connect_button);
+
+    // Create listbox
+    let listbox = ListBox::builder().build();
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
-        .hexpand(false)
-        .halign(Align::Baseline)
+        .hexpand(true)
         .child(&listbox)
         .build();
 
-    // Create placeholder window
+    // Create placeholder
     let placeholder_box = Box::new(Orientation::Vertical, 12);
     placeholder_box.set_valign(Align::Center);
     placeholder_box.set_halign(Align::Center);
@@ -141,7 +301,7 @@ fn build_ui(app: &Application) {
     placeholder_box.append(&main_label);
     placeholder_box.append(&subtitle_label);
 
-    // Create stack to switch between placeholder and chat
+    // Create stack
     let stack = Stack::builder()
         .vexpand(true)
         .hexpand(true)
@@ -151,167 +311,93 @@ fn build_ui(app: &Application) {
     stack.add_named(&scrolled_window, Some("chat"));
     stack.set_visible_child_name("placeholder");
 
-    content.append(&header);
-    content.append(&stack);
+    // Add components to tab content
+    tab_content.append(&entry_box);
+    tab_content.append(&stack);
 
-    // Shared state
-    let message_list = Arc::new(Mutex::new(listbox.clone()));
-    let stack_ref = Arc::new(Mutex::new(stack.clone()));
-    let connection_state = Arc::new(Mutex::new(ConnectionState::Disconnected));
-    let client_state = Arc::new(Mutex::new(ClientState::new()));
+    // Add to tab view
+    let page = tab_view.append(&tab_content);
+    page.set_title(label);
+
+    // Create channels for this tab
     let (tx, rx) = mpsc::channel();
     let (error_tx, error_rx) = mpsc::channel();
 
-    // Connect button handler
-    connect_button.connect_clicked(clone!(@strong message_list, @strong client_state, @strong stack_ref, @strong connection_state, @strong entry => move |_| {
-        let current_channel = entry.text().to_string();
+    // Generate unique tab ID based on current number of tabs
+    let tab_count = tabs.lock().unwrap().len();
+    let tab_id = format!("tab_{}", tab_count);
 
-        if current_channel.is_empty() {
-            // If entry is empty, disconnect and show placeholder
-            disconnect(&client_state, &connection_state, &message_list, &stack_ref, true);
-        } else {
-            // Get current state
-            let current_state = connection_state.lock().unwrap().clone();
+    let tab_data = TabData {
+        page: page.clone(),
+        listbox: listbox.clone(),
+        stack: stack.clone(),
+        entry: entry.clone(),
+        channel_name: Arc::new(Mutex::new(None)),
+        client_state: Arc::new(Mutex::new(ClientState::new())),
+        connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
+        tx,
+        rx: Arc::new(Mutex::new(rx)),
+        error_tx,
+        error_rx: Arc::new(Mutex::new(error_rx)),
+    };
 
-            match current_state {
-                ConnectionState::Connected(_) => {
-                    // Disconnect if currently connected
-                    disconnect(&client_state, &connection_state, &message_list, &stack_ref, false);
-                    // Start new connection after disconnect
-                    start_connection(
-                        &current_channel,
-                        &message_list,
-                        &client_state,
-                        &stack_ref,
-                        &connection_state,
-                        tx.clone(),
-                        error_tx.clone()
-                    );
-                },
-                ConnectionState::Disconnected | ConnectionState::Connecting => {
-                    // Start new connection
-                    start_connection(
-                        &current_channel,
-                        &message_list,
-                        &client_state,
-                        &stack_ref,
-                        &connection_state,
-                        tx.clone(),
-                        error_tx.clone()
-                    );
-                }
+    let tab_data_arc = Arc::new(tab_data);
+    tabs.lock().unwrap().insert(tab_id, tab_data_arc.clone());
+
+    // Connect button handler for this tab
+    connect_button.connect_clicked(clone!(@strong tab_data_arc => move |_| {
+        let channel_name = tab_data_arc.entry.text().to_string();
+
+        if channel_name.is_empty() {
+            // Disconnect if empty
+            disconnect_tab(&tab_data_arc);
+            return;
+        }
+
+        let current_state = tab_data_arc.connection_state.lock().unwrap().clone();
+        match current_state {
+            ConnectionState::Connected(_) => {
+                disconnect_tab(&tab_data_arc);
+                start_connection_for_tab(&channel_name, &tab_data_arc);
+            },
+            ConnectionState::Disconnected | ConnectionState::Connecting => {
+                start_connection_for_tab(&channel_name, &tab_data_arc);
             }
         }
     }));
 
-    // Message processing timer (100ms)
-    let client_state_clone = client_state.clone();
-    let connection_state_clone = connection_state.clone();
-    let message_list_clone = message_list.clone();
-    let stack_ref_clone = stack_ref.clone();
+    // Entry activation handler
+    entry.connect_activate(clone!(@strong connect_button => move |_| {
+        connect_button.emit_clicked();
+    }));
 
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        // Handle connection errors
-        loop {
-            match error_rx.try_recv() {
-                Ok(_) => {
-                    disconnect(&client_state_clone, &connection_state_clone, &message_list_clone, &stack_ref_clone, true);
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-
-        loop {
-            match rx.try_recv() {
-                Ok(msg) => {
-                    let channelid = msg.channel_id.clone();
-                    let emote_map = get_emote_map(&channelid);
-                    let message_list = message_list_clone.clone();
-
-                    // Schedule all GTK operations on the main (UI) thread
-                    idle_add_local(move || {
-                        let row = parse_message(&msg, &emote_map);
-                        let list = message_list.lock().unwrap();
-
-                        list.prepend(&row);
-
-                        // Limit the number of displayed messages
-                        let max_messages = 100;
-                        let row_count = list.observe_children().n_items();
-                        if row_count > max_messages as u32 {
-                            if let Some(last_row) = list.last_child() {
-                                list.remove(&last_row);
-                            }
-                        }
-
-                        ControlFlow::Break
-                    });
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-        glib::ControlFlow::Continue
-    });
-
-    // Emote cache cleanup timer (30 seconds)
-    glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
-        cleanup_emote_cache();
-        cleanup_media_file_cache();
-        println!("Cleaning cache...");
-        glib::ControlFlow::Continue
-    });
-
-    window.set_content(Some(&content));
-
-    let quit_action = SimpleAction::new("quit", None);
-    let window_clone = window.clone();
-    let client_state_quit = client_state.clone();
-    let connection_state_quit = connection_state.clone();
-    let message_list_quit = message_list.clone();
-    let stack_ref_quit = stack_ref.clone();
-
-    quit_action.connect_activate(move |_, _| {
-        // Clean up before quitting
-        disconnect(&client_state_quit, &connection_state_quit, &message_list_quit, &stack_ref_quit, true);
-        window_clone.close();
-    });
-    window.add_action(&quit_action);
-
-    app.set_accels_for_action("win.quit", &["<Control>q"]);
-
-    window.present();
+    // Switch to new tab
+    tab_view.set_selected_page(&page);
 }
 
-fn start_connection(
+fn start_connection_for_tab(
     channel: &str,
-    message_list: &Arc<Mutex<ListBox>>,
-    client_state: &Arc<Mutex<ClientState>>,
-    stack_ref: &Arc<Mutex<Stack>>,
-    connection_state: &Arc<Mutex<ConnectionState>>,
-    tx: std::sync::mpsc::Sender<twitch_irc::message::PrivmsgMessage>,
-    error_tx: std::sync::mpsc::Sender<()>
+    tab_data: &Arc<TabData>
 ) {
-    // Update connection state
-    *connection_state.lock().unwrap() = ConnectionState::Connecting;
+    *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
+    *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
 
-    // Clear existing messages
-    message_list.lock().unwrap().remove_all();
+    tab_data.listbox.remove_all();
+    tab_data.stack.set_visible_child_name("chat");
 
-    // Switch to chat view
-    stack_ref.lock().unwrap().set_visible_child_name("chat");
+    // Update tab title
+    tab_data.page.set_title(channel);
 
     let channel = channel.to_string();
-    let message_list = message_list.clone();
-    let connection_state = connection_state.clone();
-    let client_state_thread = client_state.clone();  // Clone for thread usage
-    let client_state_store = client_state.clone();   // Clone for storing handle
+    let connection_state = tab_data.connection_state.clone();
+    let client_state_thread = tab_data.client_state.clone();
+    let client_state_store = tab_data.client_state.clone();
+    let tx = tab_data.tx.clone();
+    let error_tx = tab_data.error_tx.clone();
 
-    // Create new client and runtime
-    let mut state = client_state.lock().unwrap();
+    let mut state = tab_data.client_state.lock().unwrap();
     let runtime = state.runtime.take().unwrap();
-    drop(state); // Release the lock before spawning thread
+    drop(state);
 
     let handle = thread::spawn(move || {
         runtime.block_on(async move {
@@ -324,13 +410,11 @@ fn start_connection(
                 return;
             }
 
-            // Update client state with the new client
             {
                 let mut state = client_state_thread.lock().unwrap();
                 state.client = Some(client);
             }
 
-            // Update connection state after successful join
             {
                 let mut state = connection_state.lock().unwrap();
                 *state = ConnectionState::Connected(channel.clone());
@@ -345,7 +429,6 @@ fn start_connection(
                 }
             }
 
-            // Connection was closed, update state
             {
                 let mut state = connection_state.lock().unwrap();
                 if matches!(*state, ConnectionState::Connected(ref c) if c == &channel) {
@@ -355,31 +438,15 @@ fn start_connection(
         });
     });
 
-    // Store the join handle
     {
         let mut state = client_state_store.lock().unwrap();
         state.join_handle = Some(handle);
     }
 }
 
-fn disconnect(
-    client_state: &Arc<Mutex<ClientState>>,
-    connection_state: &Arc<Mutex<ConnectionState>>,
-    message_list: &Arc<Mutex<ListBox>>,
-    stack_ref: &Arc<Mutex<Stack>>,
-    show_placeholder: bool
-) {
-    // Update connection state
-    *connection_state.lock().unwrap() = ConnectionState::Disconnected;
-
-    // Disconnect the client
-    client_state.lock().unwrap().disconnect();
-
-    // Clear messages
-    message_list.lock().unwrap().remove_all();
-
-    // Switch to placeholder view only if requested
-    if show_placeholder {
-        stack_ref.lock().unwrap().set_visible_child_name("placeholder");
-    }
+fn disconnect_tab(tab_data: &Arc<TabData>) {
+    *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
+    tab_data.client_state.lock().unwrap().disconnect();
+    tab_data.listbox.remove_all();
+    tab_data.stack.set_visible_child_name("placeholder");
 }
