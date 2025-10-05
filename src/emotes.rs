@@ -16,6 +16,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::sync::Weak;
 
 // Global emote cache to prevent loading the same emote multiple times
 static EMOTE_CACHE: Lazy<RwLock<HashMap<String, Arc<CachedEmote>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
@@ -26,6 +27,12 @@ static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| 
 // Tracking the last time we fetched emotes for a channel
 static LAST_FETCH_TIME: Lazy<RwLock<HashMap<String, Instant>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
+// Thread-local cache for MediaFile instances (since they're not Send/Sync)
+thread_local! {
+    static MEDIA_FILE_CACHE: RefCell<HashMap<String, MediaFile>> = RefCell::new(HashMap::new());
+    static MEDIA_FILE_REF_COUNT: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+}
+
 // Cached emote data to prevent reloading
 #[derive(Debug, Clone)]
 struct CachedEmote {
@@ -33,6 +40,7 @@ struct CachedEmote {
     texture: Option<gdk::Texture>,
     is_gif: bool,
     path: String,
+    media_file_key: String, // Key for shared MediaFile cache
 }
 
 impl CachedEmote {
@@ -43,11 +51,15 @@ impl CachedEmote {
             None
         };
 
+        // Create a unique key for the MediaFile cache based on the file path
+        let media_file_key = format!("mediafile_{}", path);
+
         Self {
             name,
             texture,
             is_gif,
             path,
+            media_file_key,
         }
     }
 }
@@ -102,7 +114,7 @@ struct ImageFile {
 // Lightweight emote widget that reuses cached resources
 struct EmoteWidget {
     widget: Picture,
-    media_file: Option<MediaFile>, // Keep reference to prevent cleanup
+    media_file_key: Option<String>, // Track which MediaFile to potentially release
     popover: Popover,
 }
 
@@ -112,26 +124,17 @@ impl EmoteWidget {
         picture.set_size_request(-0, 28);
         picture.set_can_shrink(false);
 
-        let mut media_file = None;
+        let mut media_file_key = None;
 
         if let Some(ref texture) = cached_emote.texture {
             if cached_emote.is_gif {
-                // For GIFs, we need MediaFile for animation
-                // Create MediaFile and set it as the paintable
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    MediaFile::for_filename(&cached_emote.path)
-                })) {
-                    Ok(mf) => {
-                        mf.set_loop(true);
-                        picture.set_paintable(Some(&mf));
-                        // Start playing the media file
-                        mf.play();
-                        media_file = Some(mf);
-                    },
-                    Err(_) => {
-                        // Fallback to static texture if MediaFile creation fails
-                        picture.set_paintable(Some(texture));
-                    }
+                // For GIFs, get or create shared MediaFile
+                if let Some(media_file) = get_or_create_media_file(&cached_emote.media_file_key, &cached_emote.path) {
+                    picture.set_paintable(Some(&media_file));
+                    media_file_key = Some(cached_emote.media_file_key.clone());
+                } else {
+                    // Fallback to static texture if MediaFile creation fails
+                    picture.set_paintable(Some(texture));
                 }
             } else {
                 // For static images, use the texture directly
@@ -160,7 +163,7 @@ impl EmoteWidget {
 
         Self {
             widget: picture,
-            media_file,
+            media_file_key,
             popover,
         }
     }
@@ -170,7 +173,87 @@ impl EmoteWidget {
     }
 }
 
-// Resource manager for cleanup
+// Get or create shared MediaFile for animated emotes
+fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
+    // Increment reference count
+    MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+        let mut counts = ref_counts.borrow_mut();
+        *counts.entry(key.to_string()).or_insert(0) += 1;
+    });
+
+    // Check if MediaFile already exists in thread-local cache
+    if let Some(media_file) = MEDIA_FILE_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache.get(key).cloned()
+    }) {
+        return Some(media_file);
+    }
+
+    // Create new MediaFile
+    let media_file = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MediaFile::for_filename(path)
+    })) {
+        Ok(mf) => {
+            mf.set_loop(true);
+            mf.play();
+            mf
+        },
+        Err(_) => {
+            // Decrement reference count if creation failed
+            MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+                let mut counts = ref_counts.borrow_mut();
+                if let Some(count) = counts.get_mut(key) {
+                    *count -= 1;
+                    if *count == 0 {
+                        counts.remove(key);
+                    }
+                }
+            });
+            return None;
+        }
+    };
+
+    // Store in thread-local cache
+    MEDIA_FILE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.insert(key.to_string(), media_file.clone());
+    });
+
+    Some(media_file)
+}
+
+// Decrement reference count and cleanup if needed
+fn release_media_file(key: &str) {
+    let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+        let mut counts = ref_counts.borrow_mut();
+        if let Some(count) = counts.get_mut(key) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(key);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+
+    if should_remove {
+        MEDIA_FILE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(media_file) = cache.get(key) {
+                // Stop the media file before removing it
+                if media_file.is_playing() {
+                    media_file.pause();
+                }
+            }
+            cache.remove(key);
+        });
+    }
+}
+
+// Resource manager for cleanup - only handles popovers now
 struct MessageResourceManager {
     emote_widgets: Vec<EmoteWidget>,
 }
@@ -187,20 +270,15 @@ impl MessageResourceManager {
     }
 
     fn cleanup(&mut self) {
-        // Explicit cleanup of MediaFile resources
-        for emote_widget in &mut self.emote_widgets {
-            if let Some(ref media_file) = emote_widget.media_file {
-                // Safely stop the media file before clearing the paintable
-                if media_file.is_playing() {
-                    media_file.pause();
-                }
-
-                // Wait a bit to ensure the media file has stopped
-                std::thread::sleep(std::time::Duration::from_millis(10));
-
-                // Clear the paintable to free VRAM
-                emote_widget.widget.set_paintable(None::<&gdk::Paintable>);
+        // Release MediaFile references
+        for emote_widget in &self.emote_widgets {
+            if let Some(ref key) = emote_widget.media_file_key {
+                release_media_file(key);
             }
+        }
+
+        // Only cleanup popovers since MediaFiles are shared globally
+        for emote_widget in &mut self.emote_widgets {
             // Unparent the popover to clean up
             emote_widget.popover.unparent();
         }
@@ -208,7 +286,7 @@ impl MessageResourceManager {
     }
 }
 
-// Get cached emote or load it - with MediaFile caching to avoid multiple instances
+// Get cached emote or load it
 fn get_cached_emote(emote: &Emote) -> Arc<CachedEmote> {
     let cache_key = format!("{}:{}", emote.name, emote.local_path);
 
@@ -250,6 +328,16 @@ pub fn cleanup_emote_cache() {
             cache.remove(&key);
         }
     }
+}
+
+// Cleanup MediaFile cache - remove unused MediaFiles
+pub fn cleanup_media_file_cache() {
+    MEDIA_FILE_REF_COUNT.with(|ref_counts| {
+        let keys_to_remove: Vec<_> = ref_counts.borrow().keys().cloned().collect();
+        for key in keys_to_remove {
+            release_media_file(&key);
+        }
+    });
 }
 
 /// Synchronize with 7TV if needed
@@ -626,7 +714,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
-    // Resource manager for this message
+    // Resource manager for this message - only handles popovers now
     let resource_manager = Rc::new(RefCell::new(MessageResourceManager::new()));
     let resource_manager_cleanup = Rc::clone(&resource_manager);
 

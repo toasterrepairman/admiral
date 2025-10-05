@@ -10,6 +10,7 @@ use gio::SimpleAction;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
+use tokio::runtime::Runtime;
 
 mod auth;
 mod emotes;
