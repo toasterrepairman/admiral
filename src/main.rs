@@ -64,10 +64,11 @@ impl ClientState {
     }
 }
 
-// Favorites data structure
+// Favorites data structure with starred channels
 #[derive(Deserialize, Serialize, Default)]
 struct Favorites {
     channels: Vec<String>,
+    starred: Vec<String>, // List of starred channels
 }
 
 // Tab data structure
@@ -134,8 +135,9 @@ fn save_favorites(favorites: &Favorites) {
 
 fn add_favorite(channel: &str) {
     let mut favorites = load_favorites();
-    if !favorites.channels.contains(&channel.to_lowercase()) {
-        favorites.channels.push(channel.to_lowercase());
+    let channel_lower = channel.to_lowercase();
+    if !favorites.channels.contains(&channel_lower) {
+        favorites.channels.push(channel_lower);
         favorites.channels.sort(); // Keep the list sorted
         save_favorites(&favorites);
     }
@@ -143,9 +145,34 @@ fn add_favorite(channel: &str) {
 
 fn remove_favorite(channel: &str) {
     let mut favorites = load_favorites();
-    favorites.channels.retain(|c| c != channel);
+    let channel_lower = channel.to_lowercase();
+    favorites.channels.retain(|c| c != &channel_lower);
+    favorites.starred.retain(|c| c != &channel_lower);
     save_favorites(&favorites);
 }
+
+fn toggle_star(channel: &str) {
+    let mut favorites = load_favorites();
+    let channel_lower = channel.to_lowercase();
+
+    if favorites.starred.contains(&channel_lower) {
+        // Remove from starred
+        favorites.starred.retain(|c| c != &channel_lower);
+    } else {
+        // Add to starred if it's in the favorites list
+        if favorites.channels.contains(&channel_lower) {
+            favorites.starred.push(channel_lower);
+            favorites.starred.sort(); // Keep starred sorted
+        }
+    }
+    save_favorites(&favorites);
+}
+
+fn is_starred(channel: &str) -> bool {
+    let favorites = load_favorites();
+    favorites.starred.contains(&channel.to_lowercase())
+}
+
 fn load_and_display_favorites(
     list: &ListBox,
     favorites_entry: &Entry,
@@ -158,84 +185,73 @@ fn load_and_display_favorites(
 
     let favorites = load_favorites();
 
-    // Iterate over a reference to avoid moving the vector
+    // Separate starred and non-starred channels
+    let mut starred_channels = Vec::new();
+    let mut regular_channels = Vec::new();
+
     for channel in &favorites.channels {
-        // Create a row for each favorite
-        let row = adw::ActionRow::builder()
-            .title(channel)
-            .activatable(true) // Make the row clickable
-            .build();
-
-        // Star button (already favorited, so this will be for un-favoriting)
-        let star_button = GtkButton::builder()
-            .icon_name("non-starred-symbolic")
-            .tooltip_text("Remove from favorites")
-            .build();
-
-        // Trash button (same as un-favorite in this context)
-        let trash_button = GtkButton::builder()
-            .icon_name("user-trash-symbolic")
-            .tooltip_text("Remove from favorites")
-            .build();
-
-        // Box to hold the buttons
-        let buttons_box = Box::new(Orientation::Horizontal, 6);
-        buttons_box.append(&star_button);
-        buttons_box.append(&trash_button);
-
-        // Add the buttons to the row
-        row.add_suffix(&buttons_box);
-
-        // Connect the row click to open a new tab with this channel
-        let channel_clone = channel.clone();
-        let tab_view_clone = tab_view.clone();
-        let tabs_clone = tabs.clone();
-        row.connect_activated(move |_| {
-            // Create a new tab with the channel name
-            create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
-
-            // After creating the tab, we need to trigger the connection
-            // We'll use a small timeout to ensure the tab is fully created
-            glib::timeout_add_local_once(std::time::Duration::from_millis(50), clone!(@strong channel_clone, @strong tab_view_clone, @strong tabs_clone => move || {
-                // Find the newly created tab
-                if let Some(page) = tab_view_clone.selected_page() {
-                    // Get the tab data for this page
-                    let tabs_map = tabs_clone.lock().unwrap();
-                    for (_, tab_data) in tabs_map.iter() {
-                        // This is a bit hacky - we're checking if the page matches
-                        // A better approach would be to store a reference to the tab_data when creating the tab
-                        if tab_data.page == page {
-                            // Set the entry text to the channel name
-                            tab_data.entry.set_text(&channel_clone);
-                            // Trigger the connect button
-                            tab_data.entry.emit_activate();
-                            break;
-                        }
-                    }
-                }
-                // No return value needed for timeout_add_local_once
-            }));
-        });
-
-        // Connect the buttons
-        let channel_clone = channel.clone();
-        let favorites_list_clone = favorites_list.clone();
-        star_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
-            remove_favorite(&channel_clone);
-            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
-        }));
-
-        let channel_clone = channel.clone();
-        let favorites_list_clone = favorites_list.clone();
-        trash_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
-            remove_favorite(&channel_clone);
-            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
-        }));
-
-        list.append(&row);
+        if favorites.starred.contains(channel) {
+            starred_channels.push(channel.clone());
+        } else {
+            regular_channels.push(channel.clone());
+        }
     }
 
-    // Check if the vector is empty *after* the loop
+    // Display starred channels first
+    if !starred_channels.is_empty() {
+        // Add a header for starred channels
+        let header_row = ListBoxRow::new();
+        let header_label = Label::new(Some("Starred Channels"));
+        header_label.add_css_class("heading");
+        header_row.set_child(Some(&header_label));
+        header_row.set_selectable(false);
+        list.append(&header_row);
+
+        for channel in &starred_channels {
+            create_favorite_row(
+                list,
+                channel,
+                true, // is_starred
+                &tab_view,
+                &tabs,
+                &favorites_entry,
+                &favorites_list,
+            );
+        }
+
+        // Add separator
+        let separator_row = ListBoxRow::new();
+        separator_row.set_child(Some(&Label::new(Some(""))));
+        separator_row.set_selectable(false);
+        list.append(&separator_row);
+    }
+
+    // Display regular channels
+    if !regular_channels.is_empty() {
+        // Add a header for regular channels if there are starred channels
+        if !starred_channels.is_empty() {
+            let header_row = ListBoxRow::new();
+            let header_label = Label::new(Some("Favorites"));
+            header_label.add_css_class("heading");
+            header_row.set_child(Some(&header_label));
+            header_row.set_selectable(false);
+            list.append(&header_row);
+        }
+
+        for channel in &regular_channels {
+            create_favorite_row(
+                list,
+                channel,
+                false, // is_starred
+                &tab_view,
+                &tabs,
+                &favorites_entry,
+                &favorites_list,
+            );
+        }
+    }
+
+    // Check if there are no favorites at all
     if favorites.channels.is_empty() {
         let empty_row = ListBoxRow::new();
         let empty_label = Label::new(Some("No favorites yet"));
@@ -243,6 +259,94 @@ fn load_and_display_favorites(
         empty_row.set_child(Some(&empty_label));
         list.append(&empty_row);
     }
+}
+
+fn create_favorite_row(
+    list: &ListBox,
+    channel: &str,
+    is_starred: bool,
+    tab_view: &TabView,
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
+    favorites_entry: &Entry,
+    favorites_list: &ListBox,
+) {
+    // Create a row for each favorite
+    let row = adw::ActionRow::builder()
+        .title(channel)
+        .activatable(true) // Make the row clickable
+        .build();
+
+    // Star button
+    let star_icon = if is_starred { "starred-symbolic" } else { "non-starred-symbolic" };
+    let star_tooltip = if is_starred { "Unstar channel" } else { "Star channel" };
+    let star_button = GtkButton::builder()
+        .icon_name(star_icon)
+        .tooltip_text(star_tooltip)
+        .build();
+
+    // Trash button (for removing from favorites)
+    let trash_button = GtkButton::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Remove from favorites")
+        .build();
+
+    // Box to hold the buttons
+    let buttons_box = Box::new(Orientation::Horizontal, 6);
+    buttons_box.append(&star_button);
+    buttons_box.append(&trash_button);
+
+    // Add the buttons to the row
+    row.add_suffix(&buttons_box);
+
+    // Connect the row click to open a new tab with this channel
+    let channel_clone = channel.to_string(); // Convert to owned String
+    let tab_view_clone = tab_view.clone();
+    let tabs_clone = tabs.clone();
+    row.connect_activated(move |_| {
+        // Create a new tab with the channel name
+        create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
+
+        // After creating the tab, we need to trigger the connection
+        // We'll use a small timeout to ensure the tab is fully created
+        glib::timeout_add_local_once(std::time::Duration::from_millis(50), clone!(@strong channel_clone, @strong tab_view_clone, @strong tabs_clone => move || {
+            // Find the newly created tab
+            if let Some(page) = tab_view_clone.selected_page() {
+                // Get the tab data for this page
+                let tabs_map = tabs_clone.lock().unwrap();
+                for (_, tab_data) in tabs_map.iter() {
+                    // This is a bit hacky - we're checking if the page matches
+                    // A better approach would be to store a reference to the tab_data when creating the tab
+                    if tab_data.page == page {
+                        // Set the entry text to the channel name
+                        tab_data.entry.set_text(&channel_clone);
+                        // Trigger the connect button
+                        tab_data.entry.emit_activate();
+                        break;
+                    }
+                }
+            }
+            // No return value needed for timeout_add_local_once
+        }));
+    });
+
+    // Connect the star button
+    let channel_clone = channel.to_string(); // Convert to owned String
+    let favorites_list_clone = favorites_list.clone();
+    let star_button_clone = star_button.clone();
+    star_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
+        toggle_star(&channel_clone);
+        load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
+    }));
+
+    // Connect the trash button
+    let channel_clone = channel.to_string(); // Convert to owned String
+    let favorites_list_clone = favorites_list.clone();
+    trash_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
+        remove_favorite(&channel_clone);
+        load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
+    }));
+
+    list.append(&row);
 }
 
 fn build_ui(app: &Application) {
