@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, TabOverview};
-use gtk::{ScrolledWindow, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack};
+use gtk::{ScrolledWindow, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -12,6 +12,13 @@ use std::thread;
 use tokio::runtime::Runtime;
 use glib::source::idle_add_local;
 use glib::ControlFlow;
+use serde::Deserialize;
+use serde::Serialize;
+use shellexpand; // For path expansion
+use std::fs; // For file operations
+use std::path::Path; // For path handling
+use std::io::{Read, Write}; // For reading/writing files
+use toml; // For TOML serialization
 
 mod auth; // Assuming these modules exist
 mod emotes; // Assuming these modules exist
@@ -57,6 +64,12 @@ impl ClientState {
     }
 }
 
+// Favorites data structure
+#[derive(Deserialize, Serialize, Default)]
+struct Favorites {
+    channels: Vec<String>,
+}
+
 // Tab data structure
 struct TabData {
     page: TabPage,
@@ -81,6 +94,121 @@ fn main() {
     app.run();
 }
 
+// Favorites management functions
+fn get_favorites_path() -> std::path::PathBuf {
+    let config_dir = shellexpand::tilde("~/.config/admiral").into_owned();
+    std::path::PathBuf::from(config_dir).join("favorites.toml")
+}
+
+fn load_favorites() -> Favorites {
+    let path = get_favorites_path();
+
+    if !path.exists() {
+        // Create default file if it doesn't exist
+        let favorites = Favorites::default();
+        save_favorites(&favorites);
+        return favorites;
+    }
+
+    let mut file = fs::File::open(path).expect("Failed to open favorites file");
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).expect("Failed to read favorites file");
+
+    toml::from_str(&contents).unwrap_or_else(|_| {
+        eprintln!("Failed to parse favorites file, using empty list");
+        Favorites::default()
+    })
+}
+
+fn save_favorites(favorites: &Favorites) {
+    let path = get_favorites_path();
+
+    // Create parent directories if they don't exist
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("Failed to create config directory");
+    }
+
+    let toml = toml::to_string(favorites).expect("Failed to serialize favorites");
+    fs::write(path, toml).expect("Failed to write favorites file");
+}
+
+fn add_favorite(channel: &str) {
+    let mut favorites = load_favorites();
+    if !favorites.channels.contains(&channel.to_lowercase()) {
+        favorites.channels.push(channel.to_lowercase());
+        favorites.channels.sort(); // Keep the list sorted
+        save_favorites(&favorites);
+    }
+}
+
+fn remove_favorite(channel: &str) {
+    let mut favorites = load_favorites();
+    favorites.channels.retain(|c| c != channel);
+    save_favorites(&favorites);
+}
+
+fn load_and_display_favorites(list: &ListBox, favorites_entry: &Entry, favorites_list: &ListBox) {
+    // Clear existing items
+    list.remove_all();
+
+    let favorites = load_favorites();
+
+    // Iterate over a reference to avoid moving the vector
+    for channel in &favorites.channels {
+        // Create a row for each favorite - this implements the ActionRow as requested [[8]]
+        let row = adw::ActionRow::builder()
+            .title(channel)
+            .build();
+
+        // Star button (already favorited, so this will be for un-favoriting)
+        let star_button = GtkButton::builder()
+            .icon_name("non-starred-symbolic")
+            .tooltip_text("Remove from favorites")
+            .build();
+
+        // Trash button (same as un-favorite in this context)
+        let trash_button = GtkButton::builder()
+            .icon_name("user-trash-symbolic")
+            .tooltip_text("Remove from favorites")
+            .build();
+
+        // Box to hold the buttons
+        let buttons_box = Box::new(Orientation::Horizontal, 6);
+        buttons_box.append(&star_button);
+        buttons_box.append(&trash_button);
+
+        // Add the buttons to the row
+        row.add_suffix(&buttons_box);
+        row.set_activatable(false); // Prevent row from being clickable
+
+        // Connect the buttons
+        let channel_clone = channel.clone(); // Clone the string for the closure
+        let favorites_list_clone = favorites_list.clone();
+        star_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry => move |_| {
+            remove_favorite(&channel_clone);
+            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone);
+        }));
+
+        let channel_clone = channel.clone(); // Clone the string for the closure
+        let favorites_list_clone = favorites_list.clone();
+        trash_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry => move |_| {
+            remove_favorite(&channel_clone);
+            load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone);
+        }));
+
+        list.append(&row);
+    }
+
+    // Check if the vector is empty *after* the loop
+    if favorites.channels.is_empty() {
+        let empty_row = ListBoxRow::new();
+        let empty_label = Label::new(Some("No favorites yet"));
+        empty_label.add_css_class("dim-label");
+        empty_row.set_child(Some(&empty_label));
+        list.append(&empty_row);
+    }
+}
+
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
@@ -91,29 +219,90 @@ fn build_ui(app: &Application) {
 
     // Create TabView and TabBar
     let tab_view = TabView::builder()
-        .vexpand(true) // The TabView itself expands to fill the main content area below the header and tab bar
+        .vexpand(true)
         .build();
 
     let tab_bar = TabBar::builder()
         .view(&tab_view)
-        .autohide(true) // Set to true to autohide when only one tab exists
+        .autohide(true)
         .build();
-    // Apply the 'inline' style class to make it blend with the HeaderBar
     tab_bar.add_css_class("inline");
 
     // Create HeaderBar
     let header = HeaderBar::builder()
         .build();
 
+    // === FAVORITES POPOVER IMPLEMENTATION ===
+    // Create favorites button (placed in HeaderBar, left-justified)
+    let favorites_button = GtkButton::builder()
+        .icon_name("non-starred-symbolic")
+        .tooltip_text("Favorites")
+        .build();
+
+    // Create popover content
+    let popover = Popover::builder()
+        .autohide(true)
+        .build();
+
+    // Create content for the popover
+    let popover_content = Box::new(Orientation::Vertical, 6);
+    popover_content.set_margin_top(6);
+    popover_content.set_margin_bottom(6);
+    popover_content.set_margin_start(6);
+    popover_content.set_margin_end(6);
+
+    // Entry for adding new favorites
+    let favorites_entry = Entry::builder()
+        .placeholder_text("Add channel to favorites")
+        .build();
+
+    // Button to add the channel
+    let add_favorite_button = GtkButton::builder()
+        .label("Add")
+        .build();
+
+    let favorites_entry_box = Box::new(Orientation::Horizontal, 6);
+    favorites_entry_box.append(&favorites_entry);
+    favorites_entry_box.append(&add_favorite_button);
+    popover_content.append(&favorites_entry_box);
+
+    // Scrolled window for favorites list
+    let favorites_list = ListBox::builder()
+        .vexpand(true)
+        .build();
+    let favorites_scrolled = ScrolledWindow::builder()
+        .vexpand(true)
+        .min_content_height(200)
+        .child(&favorites_list)
+        .build();
+    popover_content.append(&favorites_scrolled);
+
+    popover.set_child(Some(&popover_content));
+
+    // Store clones for the button and popover
+    let favorites_button_clone = favorites_button.clone();
+    let popover_clone = popover.clone();
+
+    // Connect the button to show the popover
+    favorites_button.connect_clicked(move |_| {
+        // This is the critical fix: set the parent before showing
+        popover_clone.set_parent(&favorites_button_clone);
+        popover_clone.popup();
+    });
+
+    // Add the favorites button to the start of the header bar (left side)
+    header.pack_start(&favorites_button);
+    // === END FAVORITES POPOVER IMPLEMENTATION ===
+
     // Add tab button (placed in HeaderBar)
     let add_tab_button = GtkButton::builder()
-        .icon_name("list-add-symbolic") // Use a standard Adwaita icon
+        .icon_name("list-add-symbolic")
         .tooltip_text("Add new tab")
         .build();
 
     // Overview button (placed in HeaderBar)
     let overview_button = GtkButton::builder()
-        .icon_name("view-grid-symbolic") // Use a standard Adwaita icon
+        .icon_name("view-grid-symbolic")
         .tooltip_text("Tab overview")
         .build();
 
@@ -121,31 +310,51 @@ fn build_ui(app: &Application) {
     header.pack_end(&add_tab_button);
     header.pack_end(&overview_button);
 
-    // Create TabOverview - This manages the content area for the tabs
+    // Create TabOverview
     let tab_overview = TabOverview::builder()
         .view(&tab_view)
-        .child(&tab_view) // The TabView is the child managed by the overview
-        .enable_new_tab(false) // Disable internal new tab button since we have our own
-        .show_end_title_buttons(false) // Disable internal close/reorder buttons if managed differently
+        .child(&tab_view)
+        .enable_new_tab(false)
+        .show_end_title_buttons(false)
         .build();
 
-    // Main content container (Vertical Box)
+    // Main content container
     let content = Box::new(Orientation::Vertical, 0);
-    content.append(&header);      // Top: HeaderBar
-    content.append(&tab_bar);    // Middle: TabBar (below header)
-    content.append(&tab_overview); // Bottom: TabOverview containing the TabView and pages
+    content.append(&header);
+    content.append(&tab_bar);
+    content.append(&tab_overview);
 
     // Store all tabs
     let tabs: Arc<Mutex<HashMap<String, Arc<TabData>>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Add tab button handler (connects to the button in the HeaderBar)
+    // Add tab button handler
     add_tab_button.connect_clicked(clone!(@strong tab_view, @strong tabs => move |_| {
         create_new_tab("New Tab", &tab_view, &tabs);
     }));
 
-    // Overview button handler (connects to the button in the HeaderBar)
+    // Favorites button handlers
+    let favorites_list_clone = favorites_list.clone();
+    let favorites_entry_clone = favorites_entry.clone();
+    add_favorite_button.connect_clicked(clone!(@strong favorites_list_clone, @strong favorites_entry_clone => move |_| {
+        let channel = favorites_entry_clone.text().to_string();
+        if !channel.is_empty() {
+            add_favorite(&channel);
+            favorites_entry_clone.set_text("");
+            load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone);
+        }
+    }));
+
+    // Connect the entry to the add button (Enter key)
+    favorites_entry_clone.connect_activate(clone!(@strong add_favorite_button => move |_| {
+        add_favorite_button.emit_clicked();
+    }));
+
+    // Load initial favorites
+    load_and_display_favorites(&favorites_list, &favorites_entry, &favorites_list);
+
+    // Overview button handler
     overview_button.connect_clicked(clone!(@strong tab_overview => move |_| {
-        tab_overview.set_open(true); // Opens the tab overview/grid view
+        tab_overview.set_open(true);
     }));
 
     // Create initial tab
@@ -227,19 +436,7 @@ fn build_ui(app: &Application) {
     let tabs_close = tabs.clone();
     close_tab_action.connect_activate(move |_, _| {
         if let Some(selected_page) = tab_view_close.selected_page() {
-            // Find the corresponding tab data to clean up client state
-            let tab_title = selected_page.title().to_string();
-            // Note: This relies on title matching, which might not be robust if titles change.
-            // A better approach might involve storing page IDs or mapping pages directly.
-            // For now, we'll remove the page and let the data cleanup happen via weak references
-            // or when the HashMap is cleared on app quit.
-            // Example cleanup attempt based on title (if title matches channel name):
-            if let Ok(mut tabs_map) = tabs_close.lock() {
-                    // Find and remove associated data if possible, e.g., by title if stored.
-                    // For simplicity here, just remove the page.
-                    // A more robust method would link the page directly to its Arc<TabData>.
-            }
-            tab_view_close.close_page(&selected_page); // This closes the selected tab
+            tab_view_close.close_page(&selected_page);
         }
     });
     window.add_action(&close_tab_action);
@@ -271,8 +468,6 @@ fn build_ui(app: &Application) {
     let tab_bar_monitor = tab_bar.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let n_pages = tab_view_monitor.n_pages();
-        // The TabBar's autohide property will handle visibility automatically
-        // when set to true, it hides if there's only one page
         glib::ControlFlow::Continue
     });
 
