@@ -173,8 +173,13 @@ impl EmoteWidget {
     }
 }
 
-// Get or create shared MediaFile for animated emotes
 fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
+    // Fail fast on off-main-thread calls — all MediaFile work must happen on GTK thread.
+    debug_assert!(
+        glib::MainContext::default().is_owner(),
+        "get_or_create_media_file MUST be called from the main (GTK) thread"
+    );
+
     // Increment reference count
     MEDIA_FILE_REF_COUNT.with(|ref_counts| {
         let mut counts = ref_counts.borrow_mut();
@@ -189,15 +194,16 @@ fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
         return Some(media_file);
     }
 
-    // Create new MediaFile
+    // Create new MediaFile (must be called on main thread)
     let media_file = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         MediaFile::for_filename(path)
     })) {
         Ok(mf) => {
+            // prepare playback
             mf.set_loop(true);
             mf.play();
             mf
-        },
+        }
         Err(_) => {
             // Decrement reference count if creation failed
             MEDIA_FILE_REF_COUNT.with(|ref_counts| {
@@ -222,8 +228,14 @@ fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
     Some(media_file)
 }
 
-// Decrement reference count and cleanup if needed
+// --- release_media_file (tear down pipeline before removing) ---
 fn release_media_file(key: &str) {
+    // MUST run on main thread
+    debug_assert!(
+        glib::MainContext::default().is_owner(),
+        "release_media_file MUST be called from the main (GTK) thread"
+    );
+
     let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
         let mut counts = ref_counts.borrow_mut();
         if let Some(count) = counts.get_mut(key) {
@@ -243,11 +255,20 @@ fn release_media_file(key: &str) {
         MEDIA_FILE_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             if let Some(media_file) = cache.get(key) {
-                // Stop the media file before removing it
+                // Try to stop playback if playing
                 if media_file.is_playing() {
-                    media_file.pause();
+                    // set playing = false
+                    media_file.set_property("playing", &false);
                 }
+
+                // IMPORTANT: clear the file so the underlying MediaStream (and GStreamer pipeline)
+                // can be torn down and free memory/resources.
+                // Use set_file(None) via gio::File
+                media_file.set_file(None::<&gio::File>);
+                // also attempt to clear filename, to be safe
+                media_file.set_filename(None::<&std::path::Path>);
             }
+            // finally remove from cache so the GObject ref can drop
             cache.remove(key);
         });
     }

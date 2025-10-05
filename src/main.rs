@@ -11,6 +11,9 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 use tokio::runtime::Runtime;
+use glib::source::idle_add_local;
+use glib::ControlFlow;
+use glib::ControlFlow::Continue;
 
 mod auth;
 mod emotes;
@@ -176,24 +179,31 @@ fn build_ui(app: &Application) {
             }
         }
 
-        // Handle incoming messages
         loop {
             match rx.try_recv() {
                 Ok(msg) => {
-                    let channelid = &msg.channel_id;
+                    let channelid = msg.channel_id.clone();
                     let emote_map = get_emote_map(&channelid);
-                    let row = parse_message(&msg, &emote_map);
-                    let mut list = message_list.lock().unwrap();
-                    list.prepend(&row);
+                    let message_list = message_list.clone(); // clone Arc<Mutex<ListBox>>
 
-                    // Limit the number of displayed messages
-                    let max_messages = 100;
-                    let row_count = list.observe_children().n_items();
-                    if row_count > max_messages as u32 {
-                        if let Some(last_row) = list.last_child() {
-                            list.remove(&last_row);
+                    // Schedule all GTK operations on the main (UI) thread
+                    idle_add_local(move || {
+                        let row = parse_message(&msg, &emote_map);
+                        let list = message_list.lock().unwrap();
+
+                        list.prepend(&row);
+
+                        // Limit the number of displayed messages
+                        let max_messages = 100;
+                        let row_count = list.observe_children().n_items();
+                        if row_count > max_messages as u32 {
+                            if let Some(last_row) = list.last_child() {
+                                list.remove(&last_row);
+                            }
                         }
-                    }
+
+                        ControlFlow::Break
+                    });
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
