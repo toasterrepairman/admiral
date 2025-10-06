@@ -315,41 +315,48 @@ fn create_favorite_row(
     row.set_activatable(true); // Ensure it's activatable
 
     // ===== ROW CLICK: Open tab and connect =====
+    // ===== ROW CLICK: Open tab and connect =====
     let channel_clone = channel.to_string();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
-    row.connect_activate(move |_| {
+
+    // Create a gesture click handler instead of using activate
+    let gesture = gtk::GestureClick::new();
+    gesture.connect_released(move |_, _, _, _| {
+        println!("Row clicked for channel: {}", channel_clone);
+
         create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
 
-        // Get the newly created tab - it should be the last page
-        let tabs_guard = tabs_clone.lock().unwrap();
-        let mut target_tab_data = None;
+        // Small delay to ensure tab is fully created
+        let tab_view_clone2 = tab_view_clone.clone();
+        let tabs_clone2 = tabs_clone.clone();
+        let channel_clone2 = channel_clone.clone();
 
-        // Find the tab that was just created (the last one)
-        if let Some(last_index) = tabs_guard.keys().last() {
-            if let Some(tab_data) = tabs_guard.get(last_index) {
-                target_tab_data = Some(Arc::clone(tab_data));
-            }
-        }
+        glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            println!("Attempting to connect to channel: {}", channel_clone2);
 
-        // If we couldn't find it by index, try to find it by the page being selected
-        if target_tab_data.is_none() {
-            if let Some(selected_page) = tab_view_clone.selected_page() {
+            if let Some(selected_page) = tab_view_clone2.selected_page() {
+                let tabs_guard = tabs_clone2.lock().unwrap();
+
                 for (_, tab_data) in tabs_guard.iter() {
                     if tab_data.page == selected_page {
-                        target_tab_data = Some(Arc::clone(tab_data));
+                        println!("Found matching tab, setting entry and connecting");
+                        tab_data.entry.set_text(&channel_clone2);
+
+                        let tab_data_clone = Arc::clone(tab_data);
+                        let channel_for_connection = channel_clone2.clone();
+
+                        start_connection_for_tab(&channel_for_connection, &tab_data_clone);
                         break;
                     }
                 }
+            } else {
+                println!("No selected page found!");
             }
-        }
-
-        // Set the entry and trigger connection
-        if let Some(tab_data) = target_tab_data {
-            tab_data.entry.set_text(&channel_clone);
-            tab_data.entry.emit_activate();
-        }
+        });
     });
+
+    row.add_controller(gesture);
 
     // ===== STAR BUTTON =====
     let channel_clone = channel.to_string();
