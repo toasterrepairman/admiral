@@ -219,11 +219,13 @@ fn load_and_display_favorites(
             );
         }
 
-        // Add separator
-        let separator_row = ListBoxRow::new();
-        separator_row.set_child(Some(&Label::new(Some(""))));
-        separator_row.set_selectable(false);
-        list.append(&separator_row);
+        // Replace the separator with a proper horizontal separator
+        let separator = gtk::Separator::new(Orientation::Horizontal);
+        separator.set_margin_top(8);
+        separator.set_margin_bottom(8);
+        separator.set_sensitive(false);
+        separator.set_opacity(0.4); // Optional: add slight visibility
+        list.append(&separator);
     }
 
     // Display regular channels
@@ -270,11 +272,26 @@ fn create_favorite_row(
     favorites_entry: &Entry,
     favorites_list: &ListBox,
 ) {
-    // Create a row for each favorite
-    let row = adw::ActionRow::builder()
-        .title(channel)
-        .activatable(true) // Make the row clickable
+    // Create a simple ListBoxRow (not ActionRow) for minimal height
+    let row = ListBoxRow::new();
+
+    // Create a horizontal box to hold content
+    let hbox = Box::new(Orientation::Horizontal, 6); // 6px spacing between items
+    hbox.set_hexpand(true);
+    hbox.set_valign(Align::Center); // Align contents vertically in center
+
+    // Channel label (left-aligned)
+    let label = Label::builder()
+        .label(channel)
+        .halign(Align::Start)
+        .valign(Align::Center)
         .build();
+    hbox.append(&label);
+
+    // Spacer to push buttons to the right
+    let spacer = Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    hbox.append(&spacer);
 
     // Star button
     let star_icon = if is_starred { "starred-symbolic" } else { "non-starred-symbolic" };
@@ -282,55 +299,46 @@ fn create_favorite_row(
     let star_button = GtkButton::builder()
         .icon_name(star_icon)
         .tooltip_text(star_tooltip)
+        //.css_classes(&["flat", "small-button"]) // Use CSS classes for compactness
         .build();
 
-    // Trash button (for removing from favorites)
+    // Trash button
     let trash_button = GtkButton::builder()
         .icon_name("user-trash-symbolic")
         .tooltip_text("Remove from favorites")
+        //.css_classes(&["flat", "small-button"]) // Use CSS classes for compactness
         .build();
 
-    // Box to hold the buttons
-    let buttons_box = Box::new(Orientation::Horizontal, 6);
-    buttons_box.append(&star_button);
-    buttons_box.append(&trash_button);
+    // Add buttons to hbox
+    hbox.append(&star_button);
+    hbox.append(&trash_button);
 
-    // Add the buttons to the row
-    row.add_suffix(&buttons_box);
+    // Set the row's child to our hbox
+    row.set_child(Some(&hbox));
 
-    // Connect the row click to open a new tab with this channel
-    let channel_clone = channel.to_string(); // Convert to owned String
+    // Make the row clickable by connecting to button press event
+    let channel_clone = channel.to_string();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
-    row.connect_activated(move |_| {
-        // Create a new tab with the channel name
+    row.connect_activate(move |_| {
         create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
 
-        // After creating the tab, we need to trigger the connection
-        // We'll use a small timeout to ensure the tab is fully created
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), clone!(@strong channel_clone, @strong tab_view_clone, @strong tabs_clone => move || {
-            // Find the newly created tab
             if let Some(page) = tab_view_clone.selected_page() {
-                // Get the tab data for this page
                 let tabs_map = tabs_clone.lock().unwrap();
                 for (_, tab_data) in tabs_map.iter() {
-                    // This is a bit hacky - we're checking if the page matches
-                    // A better approach would be to store a reference to the tab_data when creating the tab
                     if tab_data.page == page {
-                        // Set the entry text to the channel name
                         tab_data.entry.set_text(&channel_clone);
-                        // Trigger the connect button
                         tab_data.entry.emit_activate();
                         break;
                     }
                 }
             }
-            // No return value needed for timeout_add_local_once
         }));
     });
 
-    // Connect the star button
-    let channel_clone = channel.to_string(); // Convert to owned String
+    // Connect star button
+    let channel_clone = channel.to_string();
     let favorites_list_clone = favorites_list.clone();
     let star_button_clone = star_button.clone();
     star_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
@@ -338,8 +346,8 @@ fn create_favorite_row(
         load_and_display_favorites(&favorites_list_clone, &favorites_entry, &favorites_list_clone, &tab_view, &tabs);
     }));
 
-    // Connect the trash button
-    let channel_clone = channel.to_string(); // Convert to owned String
+    // Connect trash button
+    let channel_clone = channel.to_string();
     let favorites_list_clone = favorites_list.clone();
     trash_button.connect_clicked(clone!(@strong channel_clone, @strong favorites_list_clone, @strong favorites_entry, @strong tab_view, @strong tabs => move |_| {
         remove_favorite(&channel_clone);
