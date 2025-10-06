@@ -19,6 +19,38 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::Weak;
 
+pub static MESSAGE_CSS: &str = "
+.message-box {
+    border: 1px solid alpha(#999, 0.3);
+    border-radius: 8px;
+    padding: 8px;
+    background-color: alpha(#fff, 0.02);
+}
+.message-row {
+    background-color: transparent;
+}
+.message-text {
+    font-size: 12pt;
+    line-height: 28px; /* Consistent line height matching emote size */
+}
+.dim-label {
+    color: alpha(#aaa, 0.8);
+    font-size: 0.8em;
+}
+.message-content {
+    padding-top: 4px;
+}
+.emote-popover-label {
+    font-family: monospace;
+    font-size: 11pt;
+    padding: 4px 8px;
+}
+.flowbox-child {
+    margin: 0;
+    padding: 0;
+}
+";
+
 // --- Global Caches and State ---
 // Global emote cache to prevent loading the same emote multiple times
 static EMOTE_CACHE: Lazy<RwLock<HashMap<String, Arc<CachedEmote>>>> = Lazy::new(|| RwLock::new(HashMap::new()));

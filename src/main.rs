@@ -2,7 +2,7 @@
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, TabOverview};
-use gtk::{ScrolledWindow, Button, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
+use gtk::{gdk, ScrolledWindow, Button, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
@@ -25,7 +25,7 @@ use rlimit::{Resource};
 
 mod auth; // Assuming these modules exist
 mod emotes; // Assuming these modules exist
-use crate::emotes::{get_emote_map, parse_message, cleanup_emote_cache, cleanup_media_file_cache};
+use crate::emotes::{MESSAGE_CSS, get_emote_map, parse_message, cleanup_emote_cache, cleanup_media_file_cache};
 
 // Connection state management
 #[derive(Debug, Clone)]
@@ -402,6 +402,17 @@ fn build_ui(app: &Application) {
         .default_width(700)
         .default_height(600)
         .build();
+
+    // CSS management (init once)
+    let css_provider = gtk::CssProvider::new();
+    css_provider.load_from_data(MESSAGE_CSS);
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 
     // Create TabView and TabBar
     let tab_view = TabView::builder()
