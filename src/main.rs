@@ -319,24 +319,36 @@ fn create_favorite_row(
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
     row.connect_activate(move |_| {
-        // Create the tab
         create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
 
-        // 🔧 FIX: Instead of guessing with timeout, search by channel name
-        // Since tabs are stored by channel name (assumed), look it up directly
+        // Get the newly created tab - it should be the last page
         let tabs_guard = tabs_clone.lock().unwrap();
-        if let Some(tab_data) = tabs_guard.get(&channel_clone) {
-            // Set the entry text
+        let mut target_tab_data = None;
+
+        // Find the tab that was just created (the last one)
+        if let Some(last_index) = tabs_guard.keys().last() {
+            if let Some(tab_data) = tabs_guard.get(last_index) {
+                target_tab_data = Some(Arc::clone(tab_data));
+            }
+        }
+
+        // If we couldn't find it by index, try to find it by the page being selected
+        if target_tab_data.is_none() {
+            if let Some(selected_page) = tab_view_clone.selected_page() {
+                for (_, tab_data) in tabs_guard.iter() {
+                    if tab_data.page == selected_page {
+                        target_tab_data = Some(Arc::clone(tab_data));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Set the entry and trigger connection
+        if let Some(tab_data) = target_tab_data {
             tab_data.entry.set_text(&channel_clone);
-
-            // Trigger connection — but avoid `emit_activate()` if it's not meant for this
-            // Instead, call your actual connect function directly if possible:
-            // e.g., connect_to_channel(&channel_clone, &tab_data);
-
-            // If you MUST use emit_activate (e.g., it's bound to connect logic):
             tab_data.entry.emit_activate();
         }
-        // No timeout needed — tab should exist immediately after create_new_tab
     });
 
     // ===== STAR BUTTON =====
