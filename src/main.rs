@@ -499,7 +499,7 @@ fn build_ui(app: &Application) {
     }));
 
     // Create initial tab
-    create_new_tab("Tab 1", &tab_view, &tabs);
+    create_new_tab("New Tab", &tab_view, &tabs);
 
     // Message processing timer
     let tabs_clone = tabs.clone();

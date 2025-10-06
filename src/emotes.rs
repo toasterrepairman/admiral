@@ -128,8 +128,8 @@ impl EmoteWidget {
         // Ensure emotes don't shrink or expand unexpectedly
         picture.set_hexpand(false);
         picture.set_vexpand(false);
-        picture.set_halign(gtk::Align::Center);
-        picture.set_valign(gtk::Align::Center);
+        picture.set_halign(gtk::Align::Start);  // Instead of Center
+        picture.set_valign(gtk::Align::Start);  // Instead of Center
 
         let mut media_file_key = None;
 
@@ -715,13 +715,15 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     header_box.append(&sender_label);
     header_box.append(&timestamp);
 
-    // Use a FlowBox for better handling of mixed content (text + emotes)
+    // Use a FlowBox for the message content
     let message_flowbox = gtk::FlowBox::new();
     message_flowbox.set_hexpand(true);
     message_flowbox.set_valign(gtk::Align::Start);
     message_flowbox.set_halign(gtk::Align::Start);
-    message_flowbox.set_row_spacing(2);
-    message_flowbox.set_column_spacing(2);
+    message_flowbox.set_row_spacing(0);
+    message_flowbox.set_column_spacing(0);
+    message_flowbox.set_max_children_per_line(100); // Allow many items per line
+    message_flowbox.set_homogeneous(false);
     message_flowbox.add_css_class("message-content");
 
     container.append(&header_box);
@@ -739,56 +741,65 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     let re = Regex::new(r"(\s+|\S+)").unwrap();
     let mut buffer = String::new();
 
-    for cap in re.find_iter(&msg.message_text) {
-        let word = cap.as_str();
-        let word_trim = word.trim();
+    // Process message text in larger chunks to maintain text flow
+    let re = Regex::new(r"(\S+|\s+)").unwrap(); // Split by word boundaries
+    let mut current_chunk = String::new();
 
-        if !word_trim.is_empty() && emote_map.contains_key(word_trim) {
-            if !buffer.is_empty() {
-                // Create a label for the text portion
-                let label = Label::new(Some(&buffer));
+    for cap in re.find_iter(&msg.message_text) {
+        let segment = cap.as_str();
+
+        // If this segment is whitespace, keep adding to current chunk
+        if segment.trim().is_empty() {
+            current_chunk.push_str(segment);
+            continue;
+        }
+
+        // Check if this is an emote
+        let is_emote = !segment.trim().is_empty() && emote_map.contains_key(segment.trim());
+
+        if is_emote {
+            // First, add any accumulated text chunk
+            if !current_chunk.is_empty() {
+                let label = Label::new(Some(&current_chunk));
                 label.set_wrap(true);
                 label.add_css_class("message-text");
                 label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                 label.set_xalign(0.0);
                 label.set_halign(gtk::Align::Start);
                 label.set_valign(gtk::Align::Center);
+                label.set_justify(gtk::Justification::Left);
 
-                // Add the text label to the flowbox
-                let label_container = gtk::Box::new(Orientation::Horizontal, 0);
-                label_container.append(&label);
-                message_flowbox.append(&label_container);
-                buffer.clear();
+                message_flowbox.append(&label);
+                current_chunk.clear();
             }
 
-            // Add the emote
-            let emote = &emote_map[word_trim];
+            // Add the emote directly
+            let emote = &emote_map[segment.trim()];
             let cached_emote = get_cached_emote(emote);
-
             if cached_emote.texture.is_some() {
                 let emote_widget = EmoteWidget::new(&cached_emote);
                 message_flowbox.append(&emote_widget.get_widget());
                 resource_manager.borrow_mut().add_emote_widget(emote_widget);
             } else {
-                buffer.push_str(word);
+                current_chunk.push_str(segment);
             }
         } else {
-            buffer.push_str(word);
+            current_chunk.push_str(segment);
         }
     }
 
-    if !buffer.is_empty() {
-        let label = Label::new(Some(&buffer));
+    // Add any remaining text
+    if !current_chunk.is_empty() {
+        let label = Label::new(Some(&current_chunk));
         label.set_wrap(true);
         label.add_css_class("message-text");
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_xalign(0.0);
         label.set_halign(gtk::Align::Start);
         label.set_valign(gtk::Align::Center);
+        label.set_justify(gtk::Justification::Left);
 
-        let label_container = gtk::Box::new(Orientation::Horizontal, 0);
-        label_container.append(&label);
-        message_flowbox.append(&label_container);
+        message_flowbox.append(&label);
     }
 
     // Cleanup resources when row is destroyed
