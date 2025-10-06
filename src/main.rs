@@ -21,6 +21,7 @@ use std::fs; // For file operations
 use std::path::Path; // For path handling
 use std::io::{Read, Write}; // For reading/writing files
 use toml; // For TOML serialization
+use rlimit::{Resource};
 
 mod auth; // Assuming these modules exist
 mod emotes; // Assuming these modules exist
@@ -88,10 +89,33 @@ struct TabData {
     error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
+// In your main function, replace the rlimit code with:
 fn main() {
     let app = Application::builder()
         .application_id("com.example.Admiral")
         .build();
+
+    // Add this code right after setting up the app, before app.connect_activate
+    // Check and potentially increase the file descriptor limit
+    if let Ok((soft_limit, hard_limit)) = rlimit::getrlimit(rlimit::Resource::NOFILE) {
+        println!("Current file descriptor limit: soft={}, hard={}", soft_limit, hard_limit);
+
+        // Decide on a new soft limit (ensure it doesn't exceed the hard limit)
+        // For example, setting it to the hard limit or a specific value within bounds
+        let new_soft_limit = hard_limit.min(4096); // Example: cap at 4096 or use the system hard limit
+
+        if new_soft_limit > soft_limit {
+            // Attempt to increase the soft limit up to the new value (or the hard limit, whichever is lower)
+            if let Err(e) = rlimit::setrlimit(rlimit::Resource::NOFILE, new_soft_limit, hard_limit) {
+                eprintln!("Failed to increase file descriptor soft limit: {}", e);
+            } else {
+                println!("Successfully increased file descriptor soft limit to {}", new_soft_limit);
+            }
+        }
+    } else {
+        eprintln!("Failed to get current file descriptor limits using rlimit crate.");
+    }
+
     app.connect_activate(build_ui);
     app.run();
 }

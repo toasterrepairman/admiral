@@ -1,5 +1,4 @@
 // emotes.rs
-
 use gtk::prelude::*;
 use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile, Picture, Popover, PopoverMenu, GestureClick};
 use gtk::Box as GtkBox;
@@ -37,7 +36,6 @@ thread_local! {
     static MEDIA_FILE_REF_COUNT: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
 }
 
-// --- Cached Emote Data ---
 #[derive(Debug, Clone)]
 struct CachedEmote {
     name: String,
@@ -45,6 +43,7 @@ struct CachedEmote {
     is_gif: bool,
     path: String,
     media_file_key: String, // Key for shared MediaFile cache
+    texture_ref_count: Arc<Mutex<usize>>, // Track texture references
 }
 
 impl CachedEmote {
@@ -61,9 +60,32 @@ impl CachedEmote {
             is_gif,
             path,
             media_file_key,
+            texture_ref_count: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    // Increment texture reference count
+    fn increment_texture_ref(&self) {
+        if self.texture.is_some() {
+            let mut count = self.texture_ref_count.lock().unwrap();
+            *count += 1;
+        }
+    }
+
+    // Decrement texture reference count and clean up if needed
+    fn decrement_texture_ref(&self) {
+        if self.texture.is_some() {
+            let mut count = self.texture_ref_count.lock().unwrap();
+            if *count > 0 {
+                *count -= 1;
+            }
+            // If no more references, we could potentially clear the texture
+            // Note: gdk::Texture doesn't have a direct dispose method
+            // This is handled by Rust's ownership system
         }
     }
 }
+
 
 // Your existing Emote struct for local representation
 #[derive(Debug, Clone)]
@@ -117,6 +139,7 @@ struct EmoteWidget {
     widget: Picture,
     media_file_key: Option<String>, // Track which MediaFile to potentially release upon destruction
     popover: Popover,
+    cached_emote: Arc<CachedEmote>, // Keep reference to cached emote for cleanup
 }
 
 impl EmoteWidget {
@@ -128,8 +151,10 @@ impl EmoteWidget {
         picture.set_vexpand(false);
         picture.set_halign(gtk::Align::Start);
         picture.set_valign(gtk::Align::Start);
-
         let mut media_file_key = None;
+
+        // Increment texture reference count
+        cached_emote.increment_texture_ref();
 
         if let Some(ref texture) = cached_emote.texture {
             if cached_emote.is_gif {
@@ -147,7 +172,6 @@ impl EmoteWidget {
                 picture.set_paintable(Some(texture));
             }
         }
-
         // Create popover with emote name
         let popover = Popover::new();
         popover.set_parent(&picture);
@@ -156,7 +180,6 @@ impl EmoteWidget {
         let popover_label = Label::new(Some(&format!(":{}: ", cached_emote.name)));
         popover_label.add_css_class("emote-popover-label");
         popover.set_child(Some(&popover_label));
-
         // Add click gesture to show popover
         let gesture = GestureClick::new();
         gesture.set_button(0); // Any button
@@ -165,11 +188,11 @@ impl EmoteWidget {
             popover_clone.popup();
         });
         picture.add_controller(gesture);
-
         Self {
             widget: picture,
             media_file_key, // Store the key for later cleanup
             popover,
+            cached_emote: Arc::clone(cached_emote),
         }
     }
 
@@ -182,6 +205,11 @@ impl EmoteWidget {
         if let Some(ref key) = self.media_file_key {
             release_media_file(key);
         }
+    }
+
+    // Method to release texture reference
+    fn release_texture_reference(&self) {
+        self.cached_emote.decrement_texture_ref();
     }
 }
 
@@ -300,11 +328,11 @@ impl MessageResourceManager {
     }
 
     // Performs cleanup for all managed resources when the parent message widget is destroyed.
-    // This function is called from the `destroy` signal handler of the message row.
     fn cleanup(&mut self) {
         // Clean up MediaFile references for all emote widgets
         for emote_widget in self.emote_widgets.iter() {
             emote_widget.release_media_file_reference();
+            emote_widget.release_texture_reference(); // Release texture reference
         }
         // Clean up popovers
         for emote_widget in self.emote_widgets.drain(..) {
@@ -332,6 +360,7 @@ fn get_cached_emote(emote: &Emote) -> Arc<CachedEmote> {
         emote.local_path.clone(),
         emote.is_gif,
     ));
+
     {
         let mut cache = EMOTE_CACHE.write().unwrap();
         cache.insert(cache_key, Arc::clone(&cached_emote));
@@ -462,6 +491,7 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
                     let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
                     downloading.insert(channel_id.clone(), true);
                 }
+
                 Some(thread::spawn(move || {
                     println!(
                         "Detected {} missing emotes for channel {}, starting download...",
@@ -489,8 +519,7 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
 
 fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn StdError + Send + Sync>> {
     let client = Client::new();
-    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id); // Fixed URL format
-
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
     let mut emote_names = HashSet::new();
 
     let response = client.get(&twitch_lookup_url).send()?;
@@ -518,7 +547,7 @@ fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn S
 fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
     println!("Fetching emotes for channel {} from 7TV", channel_id);
     let client = Client::new();
-    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id); // Fixed URL format
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
 
     const MAX_EMOTES_PER_BATCH: usize = 50;
     const BATCH_DELAY_MS: u64 = 500;
@@ -583,6 +612,7 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                     if host_info.url.trim().is_empty() {
                         continue;
                     }
+
                     let file_opt = find_best_image_file(&host_info.files);
                     if let Some(file_to_download) = file_opt {
                         let file_extension = file_to_download.format.to_lowercase();
@@ -751,6 +781,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     for cap in re.find_iter(&msg.message_text) {
         let segment = cap.as_str();
+
         // If this segment is whitespace, keep adding to current chunk
         if segment.trim().is_empty() {
             current_chunk.push_str(segment);
@@ -759,6 +790,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
         // Check if this is an emote
         let is_emote = !segment.trim().is_empty() && emote_map.contains_key(segment.trim());
+
         if is_emote {
             // First, add any accumulated text chunk
             if !current_chunk.is_empty() {
@@ -846,6 +878,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         }
         ",
     );
+
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
