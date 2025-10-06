@@ -1,3 +1,5 @@
+// main.rs
+
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, TabOverview};
 use gtk::{ScrolledWindow, Button, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
@@ -90,7 +92,6 @@ fn main() {
     let app = Application::builder()
         .application_id("com.example.Admiral")
         .build();
-
     app.connect_activate(build_ui);
     app.run();
 }
@@ -103,18 +104,15 @@ fn get_favorites_path() -> std::path::PathBuf {
 
 fn load_favorites() -> Favorites {
     let path = get_favorites_path();
-
     if !path.exists() {
         // Create default file if it doesn't exist
         let favorites = Favorites::default();
         save_favorites(&favorites);
         return favorites;
     }
-
     let mut file = fs::File::open(path).expect("Failed to open favorites file");
     let mut contents = String::new();
     file.read_to_string(&mut contents).expect("Failed to read favorites file");
-
     toml::from_str(&contents).unwrap_or_else(|_| {
         eprintln!("Failed to parse favorites file, using empty list");
         Favorites::default()
@@ -123,12 +121,10 @@ fn load_favorites() -> Favorites {
 
 fn save_favorites(favorites: &Favorites) {
     let path = get_favorites_path();
-
     // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("Failed to create config directory");
     }
-
     let toml = toml::to_string(favorites).expect("Failed to serialize favorites");
     fs::write(path, toml).expect("Failed to write favorites file");
 }
@@ -154,7 +150,6 @@ fn remove_favorite(channel: &str) {
 fn toggle_star(channel: &str) {
     let mut favorites = load_favorites();
     let channel_lower = channel.to_lowercase();
-
     if favorites.starred.contains(&channel_lower) {
         // Remove from starred
         favorites.starred.retain(|c| c != &channel_lower);
@@ -182,13 +177,10 @@ fn load_and_display_favorites(
 ) {
     // Clear existing items
     list.remove_all();
-
     let favorites = load_favorites();
-
     // Separate starred and non-starred channels
     let mut starred_channels = Vec::new();
     let mut regular_channels = Vec::new();
-
     for channel in &favorites.channels {
         if favorites.starred.contains(channel) {
             starred_channels.push(channel.clone());
@@ -196,7 +188,6 @@ fn load_and_display_favorites(
             regular_channels.push(channel.clone());
         }
     }
-
     // Display starred channels first
     if !starred_channels.is_empty() {
         // Add a header for starred channels
@@ -206,7 +197,6 @@ fn load_and_display_favorites(
         header_row.set_child(Some(&header_label));
         header_row.set_selectable(false);
         list.append(&header_row);
-
         for channel in &starred_channels {
             create_favorite_row(
                 list,
@@ -218,7 +208,6 @@ fn load_and_display_favorites(
                 &favorites_list,
             );
         }
-
         // Replace the separator with a proper horizontal separator
         let separator = gtk::Separator::new(Orientation::Horizontal);
         separator.set_margin_top(8);
@@ -227,7 +216,6 @@ fn load_and_display_favorites(
         separator.set_opacity(0.4); // Optional: add slight visibility
         list.append(&separator);
     }
-
     // Display regular channels
     if !regular_channels.is_empty() {
         // Add a header for regular channels if there are starred channels
@@ -239,7 +227,6 @@ fn load_and_display_favorites(
             header_row.set_selectable(false);
             list.append(&header_row);
         }
-
         for channel in &regular_channels {
             create_favorite_row(
                 list,
@@ -252,7 +239,6 @@ fn load_and_display_favorites(
             );
         }
     }
-
     // Check if there are no favorites at all
     if favorites.channels.is_empty() {
         let empty_row = ListBoxRow::new();
@@ -300,12 +286,10 @@ fn create_favorite_row(
 
     // 👉 RIGHT-ALIGN BUTTONS: Add label, then a spacer, then buttons
     content_box.append(&channel_label);
-
     // Spacer that expands to push buttons to the right
     let spacer = Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     content_box.append(&spacer);
-
     // Buttons (now right-aligned)
     content_box.append(&star_button);
     content_box.append(&trash_button);
@@ -315,7 +299,6 @@ fn create_favorite_row(
     row.set_activatable(true); // Ensure it's activatable
 
     // ===== ROW CLICK: Open tab and connect =====
-    // ===== ROW CLICK: Open tab and connect =====
     let channel_clone = channel.to_string();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
@@ -324,28 +307,21 @@ fn create_favorite_row(
     let gesture = gtk::GestureClick::new();
     gesture.connect_released(move |_, _, _, _| {
         println!("Row clicked for channel: {}", channel_clone);
-
         create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
-
         // Small delay to ensure tab is fully created
         let tab_view_clone2 = tab_view_clone.clone();
         let tabs_clone2 = tabs_clone.clone();
         let channel_clone2 = channel_clone.clone();
-
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
             println!("Attempting to connect to channel: {}", channel_clone2);
-
             if let Some(selected_page) = tab_view_clone2.selected_page() {
                 let tabs_guard = tabs_clone2.lock().unwrap();
-
                 for (_, tab_data) in tabs_guard.iter() {
                     if tab_data.page == selected_page {
                         println!("Found matching tab, setting entry and connecting");
                         tab_data.entry.set_text(&channel_clone2);
-
                         let tab_data_clone = Arc::clone(tab_data);
                         let channel_for_connection = channel_clone2.clone();
-
                         start_connection_for_tab(&channel_for_connection, &tab_data_clone);
                         break;
                     }
@@ -355,7 +331,6 @@ fn create_favorite_row(
             }
         });
     });
-
     row.add_controller(gesture);
 
     // ===== STAR BUTTON =====
@@ -408,7 +383,6 @@ fn build_ui(app: &Application) {
     let tab_view = TabView::builder()
         .vexpand(true)
         .build();
-
     let tab_bar = TabBar::builder()
         .view(&tab_view)
         .autohide(true)
@@ -479,6 +453,7 @@ fn build_ui(app: &Application) {
 
     // Add the favorites button to the start of the header bar (left side)
     header.pack_start(&favorites_button);
+
     // === END FAVORITES POPOVER IMPLEMENTATION ===
 
     // Add tab button (placed in HeaderBar)
@@ -552,7 +527,6 @@ fn build_ui(app: &Application) {
     let tabs_clone = tabs.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let tabs_map = tabs_clone.lock().unwrap();
-
         for (_, tab_data) in tabs_map.iter() {
             // Handle errors
             let error_rx = tab_data.error_rx.lock().unwrap();
@@ -567,7 +541,6 @@ fn build_ui(app: &Application) {
                     Err(TryRecvError::Disconnected) => break,
                 }
             }
-
             // Handle messages
             let rx = tab_data.rx.lock().unwrap();
             loop {
@@ -576,11 +549,9 @@ fn build_ui(app: &Application) {
                         let channelid = msg.channel_id.clone();
                         let emote_map = get_emote_map(&channelid);
                         let listbox = tab_data.listbox.clone();
-
                         idle_add_local(move || {
                             let row = parse_message(&msg, &emote_map);
                             listbox.prepend(&row);
-
                             let max_messages = 100;
                             let row_count = listbox.observe_children().n_items();
                             if row_count > max_messages as u32 {
@@ -588,7 +559,6 @@ fn build_ui(app: &Application) {
                                     listbox.remove(&last_row);
                                 }
                             }
-
                             ControlFlow::Break
                         });
                     }
@@ -597,16 +567,16 @@ fn build_ui(app: &Application) {
                 }
             }
         }
-
         glib::ControlFlow::Continue
     });
 
     // Emote cache cleanup timer
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
-        // Prevent unreferencing a null object by commenting this line out
+        // MediaFile cleanup is now handled by the resource manager per message.
+        // This call remains if there's a need for a global check, but it's less critical.
         // cleanup_media_file_cache();
-        println!("Cleaning cache...");
+        println!("Cleaning emote cache...");
         glib::ControlFlow::Continue
     });
 
@@ -640,7 +610,6 @@ fn build_ui(app: &Application) {
     let quit_action = SimpleAction::new("quit", None);
     let window_clone = window.clone();
     let tabs_quit = tabs.clone();
-
     quit_action.connect_activate(move |_, _| {
         let tabs_map = tabs_quit.lock().unwrap();
         for (_, tab_data) in tabs_map.iter() {
@@ -649,7 +618,6 @@ fn build_ui(app: &Application) {
         window_clone.close();
     });
     window.add_action(&quit_action);
-
     app.set_accels_for_action("win.quit", &["<Control>q"]);
 
     // Start monitoring tab count to control tab bar visibility
@@ -692,7 +660,6 @@ fn create_new_tab(
 
     // Create listbox for chat messages
     let listbox = ListBox::builder().build();
-
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
@@ -724,7 +691,6 @@ fn create_new_tab(
         .vexpand(true)
         .hexpand(true)
         .build();
-
     stack.add_named(&placeholder_box, Some("placeholder"));
     stack.add_named(&scrolled_window, Some("chat"));
     stack.set_visible_child_name("placeholder");
@@ -765,13 +731,11 @@ fn create_new_tab(
     // Connect the connect/disconnect button for this specific tab
     connect_button.connect_clicked(clone!(@strong tab_data_arc => move |_| {
         let channel_name = tab_data_arc.entry.text().to_string();
-
         if channel_name.is_empty() {
             // If entry is empty, disconnect the current tab
             disconnect_tab(&tab_data_arc);
             return;
         }
-
         let current_state = tab_data_arc.connection_state.lock().unwrap().clone();
         match current_state {
             ConnectionState::Connected(_) => {
@@ -801,6 +765,7 @@ fn start_connection_for_tab(
 ) {
     // Update connection state to Connecting
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
+
     // Store the channel name being connected to
     *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
 
@@ -880,11 +845,14 @@ fn start_connection_for_tab(
 fn disconnect_tab(tab_data: &Arc<TabData>) {
     // Update the tab's connection state
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
+
     // Trigger disconnection logic in the client state
     tab_data.client_state.lock().unwrap().disconnect();
+
     // Clear the chat display and show the placeholder
     tab_data.listbox.remove_all();
     tab_data.stack.set_visible_child_name("placeholder");
+
     // Reset the tab title
     tab_data.page.set_title("New Tab"); // Or some default title
 }
