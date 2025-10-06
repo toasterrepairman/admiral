@@ -1,4 +1,5 @@
 // emotes.rs
+
 use gtk::prelude::*;
 use gtk::{glib, gdk, gio, Image, Label, Orientation, Widget, ListBoxRow, MediaFile, Picture, Popover, PopoverMenu, GestureClick};
 use gtk::Box as GtkBox;
@@ -54,8 +55,10 @@ pub static MESSAGE_CSS: &str = "
 // --- Global Caches and State ---
 // Global emote cache to prevent loading the same emote multiple times
 static EMOTE_CACHE: Lazy<RwLock<HashMap<String, Arc<CachedEmote>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+
 // Tracking which channels are currently being processed
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+
 // Tracking the last time we fetched emotes for a channel
 static LAST_FETCH_TIME: Lazy<RwLock<HashMap<String, Instant>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
@@ -118,7 +121,6 @@ impl CachedEmote {
     }
 }
 
-
 // Your existing Emote struct for local representation
 #[derive(Debug, Clone)]
 pub struct Emote {
@@ -167,6 +169,7 @@ struct ImageFile {
 
 // --- Emote Widget with Proper Resource Management ---
 // Lightweight emote widget that reuses cached resources and manages MediaFile lifecycle.
+#[derive(Clone)] // Add Clone derive here
 struct EmoteWidget {
     widget: Picture,
     media_file_key: Option<String>, // Track which MediaFile to potentially release upon destruction
@@ -183,6 +186,7 @@ impl EmoteWidget {
         picture.set_vexpand(false);
         picture.set_halign(gtk::Align::Start);
         picture.set_valign(gtk::Align::Start);
+
         let mut media_file_key = None;
 
         // Increment texture reference count
@@ -204,6 +208,7 @@ impl EmoteWidget {
                 picture.set_paintable(Some(texture));
             }
         }
+
         // Create popover with emote name
         let popover = Popover::new();
         popover.set_parent(&picture);
@@ -212,6 +217,7 @@ impl EmoteWidget {
         let popover_label = Label::new(Some(&format!(":{}: ", cached_emote.name)));
         popover_label.add_css_class("emote-popover-label");
         popover.set_child(Some(&popover_label));
+
         // Add click gesture to show popover
         let gesture = GestureClick::new();
         gesture.set_button(0); // Any button
@@ -220,6 +226,7 @@ impl EmoteWidget {
             popover_clone.popup();
         });
         picture.add_controller(gesture);
+
         Self {
             widget: picture,
             media_file_key, // Store the key for later cleanup
@@ -301,6 +308,7 @@ fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
         let mut cache = cache.borrow_mut();
         cache.insert(key.to_string(), media_file.clone());
     });
+
     Some(media_file)
 }
 
@@ -366,6 +374,7 @@ impl MessageResourceManager {
             emote_widget.release_media_file_reference();
             emote_widget.release_texture_reference(); // Release texture reference
         }
+
         // Clean up popovers
         for emote_widget in self.emote_widgets.drain(..) {
             // Unparent the popover to detach it and allow it to be destroyed
@@ -397,6 +406,7 @@ fn get_cached_emote(emote: &Emote) -> Arc<CachedEmote> {
         let mut cache = EMOTE_CACHE.write().unwrap();
         cache.insert(cache_key, Arc::clone(&cached_emote));
     }
+
     cached_emote
 }
 
@@ -417,9 +427,7 @@ pub fn cleanup_emote_cache() {
     }
 }
 
-// Cleanup MediaFile cache - remove unused MediaFiles
-// This function is now less critical as cleanup happens via the resource manager.
-// It's kept for potential periodic checks if needed, but MediaFile cleanup is primarily event-driven now.
+// Add the missing function
 pub fn cleanup_media_file_cache() {
     // Schedule cleanup to happen on main thread
     glib::idle_add_local_once(|| {
@@ -495,8 +503,8 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
 
     let base_path = shellexpand::tilde("~/.config/admiral/emotes").to_string();
     let channel_path = Path::new(&base_path).join(&channel_id);
-
     let mut existing_emotes: HashSet<String> = HashSet::new();
+
     if channel_path.exists() {
         if let Ok(entries) = fs::read_dir(&channel_path) {
             for entry in entries.flatten() {
@@ -523,7 +531,6 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
                     let mut downloading = DOWNLOADING_CHANNELS.write().unwrap();
                     downloading.insert(channel_id.clone(), true);
                 }
-
                 Some(thread::spawn(move || {
                     println!(
                         "Detected {} missing emotes for channel {}, starting download...",
@@ -551,9 +558,9 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
 
 fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn StdError + Send + Sync>> {
     let client = Client::new();
-    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
-    let mut emote_names = HashSet::new();
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id); // Fixed URL
 
+    let mut emote_names = HashSet::new();
     let response = client.get(&twitch_lookup_url).send()?;
     if !response.status().is_success() {
         return Err(format!("7TV API request failed with status {}", response.status()).into());
@@ -572,14 +579,13 @@ fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn S
             return Err(format!("Failed to parse 7TV API response: {}", e).into());
         }
     }
-
     Ok(emote_names)
 }
 
 fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
     println!("Fetching emotes for channel {} from 7TV", channel_id);
     let client = Client::new();
-    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id); // Fixed URL
 
     const MAX_EMOTES_PER_BATCH: usize = 50;
     const BATCH_DELAY_MS: u64 = 500;
@@ -653,6 +659,7 @@ fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Se
                             .trim_start_matches("https://")
                             .trim_start_matches("http://")
                             .trim_start_matches("//");
+
                         let emote_url = format!("https://{}/{}", base_emote_url, file_to_download.name);
                         let local_path = channel_path.join(format!("{}.{}", active_emote.name, file_extension));
 
@@ -721,7 +728,6 @@ fn rgb_to_hex(color: &RGBColor) -> String {
     let mut r = color.r as f32 / 255.0;
     let mut g = color.g as f32 / 255.0;
     let mut b = color.b as f32 / 255.0;
-
     let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
     if luminance < 0.3 {
         let boost = 0.3 / (luminance + 0.001);
@@ -729,17 +735,14 @@ fn rgb_to_hex(color: &RGBColor) -> String {
         g *= boost;
         b *= boost;
     }
-
     let avg = (r + g + b) / 3.0;
     let vibrancy_limit = 0.7;
     r = avg + (r - avg) * vibrancy_limit;
     g = avg + (g - avg) * vibrancy_limit;
     b = avg + (b - avg) * vibrancy_limit;
-
     let r = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
     let g = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
     let b = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
-
     format!("#{:02X}{:02X}{:02X}", r, g, b)
 }
 
@@ -805,7 +808,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     // Resource manager for this message - handles MediaFile and Popover cleanup
     let resource_manager = Rc::new(RefCell::new(MessageResourceManager::new()));
-    let resource_manager_cleanup = Rc::clone(&resource_manager);
+    let resource_manager_cleanup = Rc::clone(&resource_manager); // Clone here
 
     // Process message text
     let re = Regex::new(r"(\S+|\s+)").unwrap(); // Split by word boundaries
@@ -841,6 +844,7 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
             // Add the emote directly
             let emote = &emote_map[segment.trim()];
             let cached_emote = get_cached_emote(emote);
+
             if cached_emote.texture.is_some() {
                 let emote_widget = EmoteWidget::new(&cached_emote);
                 message_flowbox.append(&emote_widget.get_widget());
@@ -871,7 +875,11 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.connect_destroy(move |_| {
         // Use catch_unwind to prevent segfaults during cleanup
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            resource_manager_cleanup.borrow_mut().cleanup();
+            // Clone the Rc before moving it into the idle closure
+            let resource_manager_to_cleanup = resource_manager_cleanup.clone();
+            glib::idle_add_local_once(move || {
+                resource_manager_to_cleanup.borrow_mut().cleanup();
+            });
         }));
     });
 
@@ -910,7 +918,6 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
         }
         ",
     );
-
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,

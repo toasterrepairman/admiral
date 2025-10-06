@@ -102,7 +102,7 @@ fn main() {
 
         // Decide on a new soft limit (ensure it doesn't exceed the hard limit)
         // For example, setting it to the hard limit or a specific value within bounds
-        let new_soft_limit = hard_limit.min(4096); // Example: cap at 4096 or use the system hard limit
+        let new_soft_limit = hard_limit.min(1024); // Example: cap at 4096 or use the system hard limit
 
         if new_soft_limit > soft_limit {
             // Attempt to increase the soft limit up to the new value (or the hard limit, whichever is lower)
