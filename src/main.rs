@@ -523,7 +523,7 @@ fn build_ui(app: &Application) {
     // Create initial tab
     create_new_tab("New Tab", &tab_view, &tabs);
 
-    // Message processing timer
+    // Message processing timer - Batch processing
     let tabs_clone = tabs.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let tabs_map = tabs_clone.lock().unwrap();
@@ -541,30 +541,46 @@ fn build_ui(app: &Application) {
                     Err(TryRecvError::Disconnected) => break,
                 }
             }
-            // Handle messages
+
+            // Batch collect messages from the channel
+            let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
             loop {
                 match rx.try_recv() {
-                    Ok(msg) => {
-                        let channelid = msg.channel_id.clone();
-                        let emote_map = get_emote_map(&channelid);
-                        let listbox = tab_data.listbox.clone();
-                        idle_add_local(move || {
-                            let row = parse_message(&msg, &emote_map);
-                            listbox.prepend(&row);
-                            let max_messages = 100;
-                            let row_count = listbox.observe_children().n_items();
-                            if row_count > max_messages as u32 {
-                                if let Some(last_row) = listbox.last_child() {
-                                    listbox.remove(&last_row);
-                                }
-                            }
-                            ControlFlow::Break
-                        });
-                    }
+                    Ok(msg) => messages_to_process.push(msg),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
                 }
+            }
+            drop(rx); // Release the lock before scheduling UI updates
+
+            // If there are messages to process, schedule a batch UI update
+            if !messages_to_process.is_empty() {
+                let listbox = tab_data.listbox.clone();
+                idle_add_local(move || {
+                    // Process the batch of messages
+                    for msg in &messages_to_process {
+                        let channelid = msg.channel_id.clone();
+                        let emote_map = get_emote_map(&channelid);
+                        let row = parse_message(&msg, &emote_map);
+                        listbox.prepend(&row);
+
+                        // Apply buffer limit after adding messages
+                        let max_messages = 50; // Reduced buffer size
+                        let row_count = listbox.observe_children().n_items();
+                        if row_count > max_messages as u32 {
+                            // Remove excess messages from the bottom (oldest)
+                            while listbox.observe_children().n_items() > max_messages as u32 {
+                                if let Some(last_row) = listbox.last_child() {
+                                    listbox.remove(&last_row);
+                                } else {
+                                    break; // Shouldn't happen if n_items > 0, but just in case
+                                }
+                            }
+                        }
+                    }
+                    ControlFlow::Break // Only run the idle callback once per batch
+                });
             }
         }
         glib::ControlFlow::Continue
