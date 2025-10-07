@@ -18,7 +18,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::sync::Weak;
 
 pub static MESSAGE_CSS: &str = "
 .message-box {
@@ -53,8 +52,8 @@ pub static MESSAGE_CSS: &str = "
 ";
 
 // --- Global Caches and State ---
-// Global emote cache to prevent loading the same emote multiple times
-static EMOTE_CACHE: Lazy<RwLock<HashMap<String, Arc<CachedEmote>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+// Cache for static image textures only (PNGs)
+static TEXTURE_CACHE: Lazy<RwLock<HashMap<String, Arc<gdk::Texture>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 // Tracking which channels are currently being processed
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| RwLock::new(HashMap::new()));
@@ -62,61 +61,68 @@ static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> = Lazy::new(|| 
 // Tracking the last time we fetched emotes for a channel
 static LAST_FETCH_TIME: Lazy<RwLock<HashMap<String, Instant>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
-// Thread-local cache for MediaFile instances (since they're not Send/Sync)
-// This map holds the actual MediaFile objects.
+// LRU cache for GIF MediaFiles with size limit
 thread_local! {
-    static MEDIA_FILE_CACHE: RefCell<HashMap<String, MediaFile>> = RefCell::new(HashMap::new());
-    // Thread-local reference counts for MediaFile instances.
-    // This map tracks how many widgets are using a specific MediaFile.
-    static MEDIA_FILE_REF_COUNT: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    static GIF_MEDIA_CACHE: RefCell<LruMediaCache> = RefCell::new(LruMediaCache::new(30)); // Max 30 GIFs in memory
 }
 
-#[derive(Debug, Clone)]
-struct CachedEmote {
-    name: String,
-    texture: Option<gdk::Texture>,
-    is_gif: bool,
-    path: String,
-    media_file_key: String, // Key for shared MediaFile cache
-    texture_ref_count: Arc<Mutex<usize>>, // Track texture references
+// Simple LRU cache for MediaFiles
+struct LruMediaCache {
+    cache: HashMap<String, (MediaFile, Instant)>,
+    max_size: usize,
 }
 
-impl CachedEmote {
-    fn new(name: String, path: String, is_gif: bool) -> Self {
-        let texture = if Path::new(&path).exists() {
-            gdk::Texture::from_filename(&path).ok()
+impl LruMediaCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            cache: HashMap::new(),
+            max_size,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<MediaFile> {
+        if let Some((media_file, _)) = self.cache.get(key) {
+            // Clone the media_file before updating
+            let media_file_clone = media_file.clone();
+            // Update access time
+            self.cache.insert(key.to_string(), (media_file_clone.clone(), Instant::now()));
+            Some(media_file_clone)
         } else {
             None
-        };
-        let media_file_key = format!("mediafile_{}", path);
-        Self {
-            name,
-            texture,
-            is_gif,
-            path,
-            media_file_key,
-            texture_ref_count: Arc::new(Mutex::new(0)),
         }
     }
 
-    // Increment texture reference count
-    fn increment_texture_ref(&self) {
-        if self.texture.is_some() {
-            let mut count = self.texture_ref_count.lock().unwrap();
-            *count += 1;
-        }
-    }
-
-    // Decrement texture reference count and clean up if needed
-    fn decrement_texture_ref(&self) {
-        if self.texture.is_some() {
-            let mut count = self.texture_ref_count.lock().unwrap();
-            if *count > 0 {
-                *count -= 1;
+    fn insert(&mut self, key: String, media_file: MediaFile) {
+        // If at capacity, remove oldest entry
+        if self.cache.len() >= self.max_size && !self.cache.contains_key(&key) {
+            if let Some(oldest_key) = self.cache.iter()
+                .min_by_key(|(_, (_, time))| time)
+                .map(|(k, _)| k.clone())
+            {
+                if let Some((old_media, _)) = self.cache.remove(&oldest_key) {
+                    // Clean up the old MediaFile
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if old_media.is_playing() {
+                            old_media.pause();
+                        }
+                        old_media.set_file(None::<&gio::File>);
+                    }));
+                }
             }
-            // If no more references, we could potentially clear the texture
-            // Note: gdk::Texture doesn't have a direct dispose method
-            // This is handled by Rust's ownership system
+        }
+
+        self.cache.insert(key, (media_file, Instant::now()));
+    }
+
+    fn clear(&mut self) {
+        // Clean up all MediaFiles
+        for (_, (media_file, _)) in self.cache.drain() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if media_file.is_playing() {
+                    media_file.pause();
+                }
+                media_file.set_file(None::<&gio::File>);
+            }));
         }
     }
 }
@@ -167,45 +173,49 @@ struct ImageFile {
     format: String,
 }
 
-// --- Emote Widget with Proper Resource Management ---
-// Lightweight emote widget that reuses cached resources and manages MediaFile lifecycle.
-#[derive(Clone)] // Add Clone derive here
+// --- Simplified Emote Widget ---
 struct EmoteWidget {
-    widget: Picture,
-    media_file_key: Option<String>, // Track which MediaFile to potentially release upon destruction
+    picture: Picture,
     popover: Popover,
-    cached_emote: Arc<CachedEmote>, // Keep reference to cached emote for cleanup
+    emote_name: String,
 }
 
 impl EmoteWidget {
-    fn new(cached_emote: &Arc<CachedEmote>) -> Self {
+    fn new(emote: &Emote) -> Self {
         let picture = Picture::new();
-        // Set fixed size for consistent line height
         picture.set_size_request(28, 28);
         picture.set_hexpand(false);
         picture.set_vexpand(false);
         picture.set_halign(gtk::Align::Start);
         picture.set_valign(gtk::Align::Start);
 
-        let mut media_file_key = None;
+        if emote.is_gif {
+            // For GIFs, use LRU cached MediaFile or create new one
+            let media_file = GIF_MEDIA_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
 
-        // Increment texture reference count
-        cached_emote.increment_texture_ref();
-
-        if let Some(ref texture) = cached_emote.texture {
-            if cached_emote.is_gif {
-                // For GIFs, get or create shared MediaFile
-                if let Some(media_file) = get_or_create_media_file(&cached_emote.media_file_key, &cached_emote.path) {
-                    picture.set_paintable(Some(&media_file));
-                    // Only store the key if MediaFile creation was successful
-                    media_file_key = Some(cached_emote.media_file_key.clone());
+                // Try to get from cache
+                if let Some(cached) = cache.get(&emote.local_path) {
+                    cached
                 } else {
-                    // Fallback to static texture if MediaFile creation fails
-                    picture.set_paintable(Some(texture));
+                    // Create new MediaFile
+                    let media_file = MediaFile::for_filename(&emote.local_path);
+                    media_file.set_loop(true);
+                    media_file.play();
+
+                    // Add to cache
+                    cache.insert(emote.local_path.clone(), media_file.clone());
+                    media_file
                 }
-            } else {
-                // For static images, use the texture directly
-                picture.set_paintable(Some(texture));
+            });
+
+            picture.set_paintable(Some(&media_file));
+        } else {
+            // For static images, use shared texture cache
+            let texture = get_or_load_texture(&emote.local_path);
+            if let Some(tex) = texture {
+                // Dereference Arc to get &Texture
+                picture.set_paintable(Some(&*tex));
             }
         }
 
@@ -214,13 +224,13 @@ impl EmoteWidget {
         popover.set_parent(&picture);
         popover.set_position(gtk::PositionType::Top);
         popover.set_autohide(true);
-        let popover_label = Label::new(Some(&format!(":{}: ", cached_emote.name)));
+        let popover_label = Label::new(Some(&format!(":{}: ", emote.name)));
         popover_label.add_css_class("emote-popover-label");
         popover.set_child(Some(&popover_label));
 
         // Add click gesture to show popover
         let gesture = GestureClick::new();
-        gesture.set_button(0); // Any button
+        gesture.set_button(0);
         let popover_clone = popover.clone();
         gesture.connect_pressed(move |_, _, _, _| {
             popover_clone.popup();
@@ -228,214 +238,92 @@ impl EmoteWidget {
         picture.add_controller(gesture);
 
         Self {
-            widget: picture,
-            media_file_key, // Store the key for later cleanup
+            picture,
             popover,
-            cached_emote: Arc::clone(cached_emote),
+            emote_name: emote.name.clone(),
         }
     }
 
     fn get_widget(&self) -> Widget {
-        self.widget.clone().upcast::<Widget>()
+        self.picture.clone().upcast::<Widget>()
     }
 
-    // Method to release the MediaFile reference when the widget is destroyed
-    fn release_media_file_reference(&self) {
-        if let Some(ref key) = self.media_file_key {
-            release_media_file(key);
-        }
-    }
-
-    // Method to release texture reference
-    fn release_texture_reference(&self) {
-        self.cached_emote.decrement_texture_ref();
+    fn cleanup(&self) {
+        // Unparent the popover
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.popover.unparent();
+        }));
     }
 }
 
-// --- MediaFile Management Functions ---
-// Gets or creates a shared MediaFile instance for a given key and path.
-// Must be called from the main GTK thread.
-fn get_or_create_media_file(key: &str, path: &str) -> Option<MediaFile> {
-    debug_assert!(
-        glib::MainContext::default().is_owner(),
-        "get_or_create_media_file MUST be called from the main (GTK) thread"
-    );
-
-    // Increment reference count
-    MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-        let mut counts = ref_counts.borrow_mut();
-        *counts.entry(key.to_string()).or_insert(0) += 1;
-    });
-
-    // Check if MediaFile already exists in thread-local cache
-    if let Some(media_file) = MEDIA_FILE_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        cache.get(key).cloned()
-    }) {
-        return Some(media_file);
-    }
-
-    // Create new MediaFile (must be called on main thread)
-    let media_file = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        MediaFile::for_filename(path)
-    })) {
-        Ok(mf) => {
-            // prepare playback
-            mf.set_loop(true);
-            mf.play();
-            mf
-        }
-        Err(_) => {
-            // Decrement reference count if creation failed
-            MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-                let mut counts = ref_counts.borrow_mut();
-                if let Some(count) = counts.get_mut(key) {
-                    if *count > 0 {
-                        *count -= 1;
-                    }
-                    // Remove the key if count drops to zero after a failed creation attempt.
-                    if *count == 0 {
-                        counts.remove(key);
-                    }
-                }
-            });
-            return None;
-        }
-    };
-
-    // Store in thread-local cache
-    MEDIA_FILE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.insert(key.to_string(), media_file.clone());
-    });
-
-    Some(media_file)
-}
-
-// Decrements the reference count for a MediaFile key.
-// If the count reaches zero, the MediaFile is stopped, cleared, and removed from the cache.
-fn release_media_file(key: &str) {
-    let should_remove = MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-        let mut counts = ref_counts.borrow_mut();
-        if let Some(count) = counts.get_mut(key) {
-            if *count > 0 {
-                *count -= 1;
-            }
-            *count == 0 // Check if count is now zero after decrement
-        } else {
-            false // Key doesn't exist in ref count map
-        }
-    });
-
-    if should_remove {
-        // Remove the MediaFile from the cache and perform cleanup
-        MEDIA_FILE_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if let Some(media_file) = cache.remove(key) {
-                // Attempt cleanup operations, catch panics to prevent crashes during widget destruction
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if media_file.is_playing() {
-                        media_file.pause(); // Stop playback
-                    }
-                    media_file.set_file(None::<&gio::File>); // Clear the underlying file reference
-                }));
-            }
-        });
-        // Also remove the key from the ref count map after the MediaFile is gone
-        MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-            let mut counts = ref_counts.borrow_mut();
-            counts.remove(key);
-        });
-    }
-}
-
-// --- Resource Manager for Message Widgets ---
-// Manages resources (like MediaFile references and popovers) associated with a single message widget.
-// Ensures these resources are cleaned up when the message widget is destroyed.
-struct MessageResourceManager {
-    emote_widgets: Vec<EmoteWidget>,
-}
-
-impl MessageResourceManager {
-    fn new() -> Self {
-        Self {
-            emote_widgets: Vec::new(),
-        }
-    }
-
-    fn add_emote_widget(&mut self, widget: EmoteWidget) {
-        self.emote_widgets.push(widget);
-    }
-
-    // Performs cleanup for all managed resources when the parent message widget is destroyed.
-    fn cleanup(&mut self) {
-        // Clean up MediaFile references for all emote widgets
-        for emote_widget in self.emote_widgets.iter() {
-            emote_widget.release_media_file_reference();
-            emote_widget.release_texture_reference(); // Release texture reference
-        }
-
-        // Clean up popovers
-        for emote_widget in self.emote_widgets.drain(..) {
-            // Unparent the popover to detach it and allow it to be destroyed
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                emote_widget.popover.unparent();
-            }));
-        }
-    }
-}
-
-// --- Cache Management ---
-// Get cached emote or load it
-fn get_cached_emote(emote: &Emote) -> Arc<CachedEmote> {
-    let cache_key = format!("{}:{}", emote.name, emote.local_path);
+// Get or load a texture from cache
+fn get_or_load_texture(path: &str) -> Option<Arc<gdk::Texture>> {
+    // Check cache first
     {
-        let cache = EMOTE_CACHE.read().unwrap();
-        if let Some(cached) = cache.get(&cache_key) {
-            return Arc::clone(cached);
+        let cache = TEXTURE_CACHE.read().unwrap();
+        if let Some(texture) = cache.get(path) {
+            return Some(Arc::clone(texture));
         }
     }
 
-    let cached_emote = Arc::new(CachedEmote::new(
-        emote.name.clone(),
-        emote.local_path.clone(),
-        emote.is_gif,
-    ));
-
-    {
-        let mut cache = EMOTE_CACHE.write().unwrap();
-        cache.insert(cache_key, Arc::clone(&cached_emote));
+    // Load texture if file exists
+    if !Path::new(path).exists() {
+        return None;
     }
 
-    cached_emote
+    let texture = gdk::Texture::from_filename(path).ok()?;
+    let arc_texture = Arc::new(texture);
+
+    // Store in cache
+    {
+        let mut cache = TEXTURE_CACHE.write().unwrap();
+        cache.insert(path.to_string(), Arc::clone(&arc_texture));
+    }
+
+    Some(arc_texture)
 }
 
-// Periodic cache cleanup to prevent unbounded growth
+// --- Cache Cleanup Functions ---
 pub fn cleanup_emote_cache() {
-    let mut cache = EMOTE_CACHE.write().unwrap();
-    // Remove entries where the file no longer exists
-    cache.retain(|_, cached_emote| {
-        Path::new(&cached_emote.path).exists()
-    });
-    // If cache is still too large, remove oldest entries (LRU could be implemented if needed)
-    // Using a simple approach: remove half if over 500 entries.
-    if cache.len() > 500 {
-        let keys_to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+    // Clean up texture cache
+    let mut texture_cache = TEXTURE_CACHE.write().unwrap();
+    texture_cache.retain(|path, _| Path::new(path).exists());
+
+    // If cache is still too large, remove half
+    if texture_cache.len() > 500 {
+        let keys_to_remove: Vec<_> = texture_cache.keys().take(texture_cache.len() / 2).cloned().collect();
         for key in keys_to_remove {
-            cache.remove(&key);
+            texture_cache.remove(&key);
         }
     }
+
+    // Clean up LAST_FETCH_TIME
+    let mut last_fetch = LAST_FETCH_TIME.write().unwrap();
+    let now = Instant::now();
+    last_fetch.retain(|_, time| now.duration_since(*time) < Duration::from_secs(3600)); // Keep entries for 1 hour
 }
 
-// Add the missing function
 pub fn cleanup_media_file_cache() {
-    // Schedule cleanup to happen on main thread
     glib::idle_add_local_once(|| {
-        MEDIA_FILE_REF_COUNT.with(|ref_counts| {
-            let keys_to_remove: Vec<_> = ref_counts.borrow().keys().cloned().collect();
+        GIF_MEDIA_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+
+            // Remove entries that haven't been accessed in 60 seconds
+            let now = Instant::now();
+            let keys_to_remove: Vec<_> = cache.cache.iter()
+                .filter(|(_, (_, time))| now.duration_since(*time) > Duration::from_secs(60))
+                .map(|(k, _)| k.clone())
+                .collect();
+
             for key in keys_to_remove {
-                // release_media_file handles checking ref count and actual removal
-                release_media_file(&key);
+                if let Some((media_file, _)) = cache.cache.remove(&key) {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if media_file.is_playing() {
+                            media_file.pause();
+                        }
+                        media_file.set_file(None::<&gio::File>);
+                    }));
+                }
             }
         });
     });
@@ -558,7 +446,7 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
 
 fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn StdError + Send + Sync>> {
     let client = Client::new();
-    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id); // Fixed URL
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
 
     let mut emote_names = HashSet::new();
     let response = client.get(&twitch_lookup_url).send()?;
@@ -585,7 +473,7 @@ fn get_remote_emote_names(channel_id: &str) -> Result<HashSet<String>, Box<dyn S
 fn download_channel_emotes(channel_id: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
     println!("Fetching emotes for channel {} from 7TV", channel_id);
     let client = Client::new();
-    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id); // Fixed URL
+    let twitch_lookup_url = format!("https://7tv.io/v3/users/twitch/{}", channel_id);
 
     const MAX_EMOTES_PER_BATCH: usize = 50;
     const BATCH_DELAY_MS: u64 = 500;
@@ -746,6 +634,29 @@ fn rgb_to_hex(color: &RGBColor) -> String {
     format!("#{:02X}{:02X}{:02X}", r, g, b)
 }
 
+// --- Simplified Message Resource Manager ---
+struct MessageResourceManager {
+    emote_widgets: Vec<EmoteWidget>,
+}
+
+impl MessageResourceManager {
+    fn new() -> Self {
+        Self {
+            emote_widgets: Vec::new(),
+        }
+    }
+
+    fn add_emote_widget(&mut self, widget: EmoteWidget) {
+        self.emote_widgets.push(widget);
+    }
+
+    fn cleanup(&mut self) {
+        for widget in self.emote_widgets.drain(..) {
+            widget.cleanup();
+        }
+    }
+}
+
 // --- Message Parsing and Widget Creation ---
 pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -> Widget {
     let container = GtkBox::new(Orientation::Vertical, 2);
@@ -806,28 +717,25 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
     row.set_child(Some(&container));
     row.add_css_class("message-row");
 
-    // Resource manager for this message - handles MediaFile and Popover cleanup
+    // Resource manager for this message
     let resource_manager = Rc::new(RefCell::new(MessageResourceManager::new()));
-    let resource_manager_cleanup = Rc::clone(&resource_manager); // Clone here
+    let resource_manager_cleanup = Rc::clone(&resource_manager);
 
     // Process message text
-    let re = Regex::new(r"(\S+|\s+)").unwrap(); // Split by word boundaries
+    let re = Regex::new(r"(\S+|\s+)").unwrap();
     let mut current_chunk = String::new();
 
     for cap in re.find_iter(&msg.message_text) {
         let segment = cap.as_str();
 
-        // If this segment is whitespace, keep adding to current chunk
         if segment.trim().is_empty() {
             current_chunk.push_str(segment);
             continue;
         }
 
-        // Check if this is an emote
         let is_emote = !segment.trim().is_empty() && emote_map.contains_key(segment.trim());
 
         if is_emote {
-            // First, add any accumulated text chunk
             if !current_chunk.is_empty() {
                 let label = Label::new(Some(&current_chunk));
                 label.set_wrap(true);
@@ -841,24 +749,15 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
                 current_chunk.clear();
             }
 
-            // Add the emote directly
             let emote = &emote_map[segment.trim()];
-            let cached_emote = get_cached_emote(emote);
-
-            if cached_emote.texture.is_some() {
-                let emote_widget = EmoteWidget::new(&cached_emote);
-                message_flowbox.append(&emote_widget.get_widget());
-                // Add the widget to the resource manager for later cleanup
-                resource_manager.borrow_mut().add_emote_widget(emote_widget);
-            } else {
-                current_chunk.push_str(segment);
-            }
+            let emote_widget = EmoteWidget::new(emote);
+            message_flowbox.append(&emote_widget.get_widget());
+            resource_manager.borrow_mut().add_emote_widget(emote_widget);
         } else {
             current_chunk.push_str(segment);
         }
     }
 
-    // Add any remaining text
     if !current_chunk.is_empty() {
         let label = Label::new(Some(&current_chunk));
         label.set_wrap(true);
@@ -873,58 +772,13 @@ pub fn parse_message(msg: &PrivmsgMessage, emote_map: &HashMap<String, Emote>) -
 
     // Cleanup resources when row is destroyed
     row.connect_destroy(move |_| {
-        // Use catch_unwind to prevent segfaults during cleanup
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Clone the Rc before moving it into the idle closure
             let resource_manager_to_cleanup = resource_manager_cleanup.clone();
             glib::idle_add_local_once(move || {
                 resource_manager_to_cleanup.borrow_mut().cleanup();
             });
         }));
     });
-
-    // Apply CSS styling
-    let css_provider = gtk::CssProvider::new();
-    css_provider.load_from_data(
-        "
-        .message-box {
-            border: 1px solid alpha(#999, 0.3);
-            border-radius: 8px;
-            padding: 8px;
-            background-color: alpha(#fff, 0.02);
-        }
-        .message-row {
-            background-color: transparent;
-        }
-        .message-text {
-            font-size: 12pt;
-            line-height: 28px; /* Consistent line height matching emote size */
-        }
-        .dim-label {
-            color: alpha(#aaa, 0.8);
-            font-size: 0.8em;
-        }
-        .message-content {
-            padding-top: 4px;
-        }
-        .emote-popover-label {
-            font-family: monospace;
-            font-size: 11pt;
-            padding: 4px 8px;
-        }
-        .flowbox-child {
-            margin: 0;
-            padding: 0;
-        }
-        ",
-    );
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &css_provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
 
     row.upcast::<Widget>()
 }

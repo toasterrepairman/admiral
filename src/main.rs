@@ -308,7 +308,7 @@ fn create_favorite_row(
         .tooltip_text("Remove from favorites")
         .build();
 
-    // 👉 RIGHT-ALIGN BUTTONS: Add label, then a spacer, then buttons
+    // RIGHT-ALIGN BUTTONS: Add label, then a spacer, then buttons
     content_box.append(&channel_label);
     // Spacer that expands to push buttons to the right
     let spacer = Box::new(Orientation::Horizontal, 0);
@@ -393,6 +393,27 @@ fn create_favorite_row(
 
     row.add_css_class("compact-row");
     list.append(&row);
+}
+
+/// Centralized disconnect handler - properly cleans up tab resources
+fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
+    println!("Disconnecting tab...");
+
+    // Update the tab's connection state
+    *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
+
+    // Trigger disconnection logic in the client state
+    tab_data.client_state.lock().unwrap().disconnect();
+
+    // Clear the chat display and show the placeholder
+    tab_data.listbox.remove_all();
+    tab_data.stack.set_visible_child_name("placeholder");
+
+    // Reset the tab title
+    tab_data.page.set_title("New Tab");
+
+    // Clear the channel name
+    *tab_data.channel_name.lock().unwrap() = None;
 }
 
 fn build_ui(app: &Application) {
@@ -558,6 +579,36 @@ fn build_ui(app: &Application) {
     // Create initial tab
     create_new_tab("New Tab", &tab_view, &tabs);
 
+    // Handle tab close events - THIS IS THE KEY FIX
+    let tabs_for_close = tabs.clone();
+    tab_view.connect_close_page(move |_tab_view, page| {
+        println!("Tab close requested");
+
+        // Find and disconnect the tab being closed
+        let tabs_map = tabs_for_close.lock().unwrap();
+        let mut tab_id_to_remove = None;
+
+        for (tab_id, tab_data) in tabs_map.iter() {
+            if &tab_data.page == page {
+                println!("Found tab to disconnect: {}", tab_id);
+                disconnect_tab_handler(tab_data);
+                tab_id_to_remove = Some(tab_id.clone());
+                break;
+            }
+        }
+
+        drop(tabs_map); // Release lock before removal
+
+        // Remove the tab from the HashMap
+        if let Some(tab_id) = tab_id_to_remove {
+            tabs_for_close.lock().unwrap().remove(&tab_id);
+            println!("Removed tab from HashMap: {}", tab_id);
+        }
+
+        // Allow the close to proceed
+        glib::Propagation::Proceed
+    });
+
     // Message processing timer - Batch processing
     let tabs_clone = tabs.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
@@ -569,7 +620,7 @@ fn build_ui(app: &Application) {
                 match error_rx.try_recv() {
                     Ok(_) => {
                         drop(error_rx);
-                        disconnect_tab(tab_data);
+                        disconnect_tab_handler(tab_data);
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -624,9 +675,7 @@ fn build_ui(app: &Application) {
     // Emote cache cleanup timer
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
-        // MediaFile cleanup is now handled by the resource manager per message.
-        // This call remains if there's a need for a global check, but it's less critical.
-        // cleanup_media_file_cache();
+        cleanup_media_file_cache();
         println!("Cleaning emote cache...");
         glib::ControlFlow::Continue
     });
@@ -643,7 +692,6 @@ fn build_ui(app: &Application) {
     // Action for closing the selected tab (Ctrl+W)
     let close_tab_action = SimpleAction::new("close-tab", None);
     let tab_view_close = tab_view.clone();
-    let tabs_close = tabs.clone();
     close_tab_action.connect_activate(move |_, _| {
         if let Some(selected_page) = tab_view_close.selected_page() {
             tab_view_close.close_page(&selected_page);
@@ -657,19 +705,43 @@ fn build_ui(app: &Application) {
 
     window.set_content(Some(&content));
 
-    // Quit action
+    // Quit action - THIS IS THE KEY FIX FOR APPLICATION SHUTDOWN
     let quit_action = SimpleAction::new("quit", None);
-    let window_clone = window.clone();
     let tabs_quit = tabs.clone();
     quit_action.connect_activate(move |_, _| {
+        println!("Quit action triggered");
         let tabs_map = tabs_quit.lock().unwrap();
-        for (_, tab_data) in tabs_map.iter() {
-            disconnect_tab(tab_data);
+        for (tab_id, tab_data) in tabs_map.iter() {
+            println!("Disconnecting tab: {}", tab_id);
+            disconnect_tab_handler(tab_data);
         }
-        window_clone.close();
+        drop(tabs_map);
+
+        // Clear the HashMap
+        tabs_quit.lock().unwrap().clear();
+        println!("All tabs disconnected and cleared");
     });
     window.add_action(&quit_action);
     app.set_accels_for_action("win.quit", &["<Control>q"]);
+
+    // Handle window close button properly
+    let tabs_for_window_close = tabs.clone();
+    window.connect_close_request(move |_window| {
+        println!("Window close button clicked");
+        let tabs_map = tabs_for_window_close.lock().unwrap();
+        for (tab_id, tab_data) in tabs_map.iter() {
+            println!("Disconnecting tab on window close: {}", tab_id);
+            disconnect_tab_handler(tab_data);
+        }
+        drop(tabs_map);
+
+        // Clear the HashMap
+        tabs_for_window_close.lock().unwrap().clear();
+        println!("All tabs disconnected on window close");
+
+        // Allow the window to close
+        glib::Propagation::Proceed
+    });
 
     // Start monitoring tab count to control tab bar visibility
     let tab_view_monitor = tab_view.clone();
@@ -758,9 +830,13 @@ fn create_new_tab(
     let (tx, rx) = mpsc::channel();
     let (error_tx, error_rx) = mpsc::channel();
 
-    // Generate a unique identifier for this tab
+    // Generate a unique identifier for this tab using timestamp + counter
     let tab_count = tabs.lock().unwrap().len();
-    let tab_id = format!("tab_{}", tab_count);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let tab_id = format!("tab_{}_{}", timestamp, tab_count);
 
     let tab_data = TabData {
         page: page.clone(),
@@ -777,21 +853,22 @@ fn create_new_tab(
     };
 
     let tab_data_arc = Arc::new(tab_data);
-    tabs.lock().unwrap().insert(tab_id, tab_data_arc.clone()); // Store the tab data
+    tabs.lock().unwrap().insert(tab_id.clone(), tab_data_arc.clone());
+    println!("Created new tab with id: {}", tab_id);
 
     // Connect the connect/disconnect button for this specific tab
     connect_button.connect_clicked(clone!(@strong tab_data_arc => move |_| {
         let channel_name = tab_data_arc.entry.text().to_string();
         if channel_name.is_empty() {
             // If entry is empty, disconnect the current tab
-            disconnect_tab(&tab_data_arc);
+            disconnect_tab_handler(&tab_data_arc);
             return;
         }
         let current_state = tab_data_arc.connection_state.lock().unwrap().clone();
         match current_state {
             ConnectionState::Connected(_) => {
                 // If already connected, disconnect first, then connect to the new channel
-                disconnect_tab(&tab_data_arc);
+                disconnect_tab_handler(&tab_data_arc);
                 start_connection_for_tab(&channel_name, &tab_data_arc);
             },
             ConnectionState::Disconnected | ConnectionState::Connecting => {
@@ -891,19 +968,4 @@ fn start_connection_for_tab(
         let mut state = client_state_store.lock().unwrap();
         state.join_handle = Some(handle);
     }
-}
-
-fn disconnect_tab(tab_data: &Arc<TabData>) {
-    // Update the tab's connection state
-    *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
-
-    // Trigger disconnection logic in the client state
-    tab_data.client_state.lock().unwrap().disconnect();
-
-    // Clear the chat display and show the placeholder
-    tab_data.listbox.remove_all();
-    tab_data.stack.set_visible_child_name("placeholder");
-
-    // Reset the tab title
-    tab_data.page.set_title("New Tab"); // Or some default title
 }
