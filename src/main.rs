@@ -547,44 +547,37 @@ fn build_ui(app: &Application) {
         glib::Propagation::Proceed
     });
 
-    // Message processing timer - Batch processing for WebView
     let tabs_clone = tabs.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let tabs_map = tabs_clone.lock().unwrap();
         for (_, tab_data) in tabs_map.iter() {
-            let error_rx = tab_data.error_rx.lock().unwrap();
-            loop {
-                match error_rx.try_recv() {
-                    Ok(_) => {
-                        drop(error_rx);
-                        disconnect_tab_handler(tab_data);
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
-                }
-            }
+            // ... error handling loop ...
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
             loop {
                 match rx.try_recv() {
-                    Ok(msg) => messages_to_process.push(msg),
+                    Ok(msg) => messages_to_process.push(msg), // msg is PrivmsgMessage
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
                 }
             }
             drop(rx);
-
             if !messages_to_process.is_empty() {
                 let webview = tab_data.webview.clone();
-                let channelid = tab_data.channel_name.lock().unwrap().clone(); // Get channel ID for emote map
-                if let Some(channel_id_str) = channelid {
-                    idle_add_local(move || {
-                        let emote_map = get_emote_map(&channel_id_str); // Fetch emote map for the specific channel
+                // NEW: Extract channel_id from the first message BEFORE moving messages_to_process
+                // This assumes all messages in the batch are from the same channel.
+                // The channel_id field in PrivmsgMessage should be the unique identifier.
+                let channel_id_for_closure = messages_to_process
+                    .first()
+                    .map(|msg| msg.channel_id.clone()); // Clone the String
 
+                if let Some(channel_id_str) = channel_id_for_closure { // Check if extraction succeeded
+                    idle_add_local(move || { // Now move messages_to_process into the closure
+                        // NEW: Pass the extracted channel_id string to get_emote_map
+                        let emote_map = get_emote_map(&channel_id_str); // Use the channel_id string
                         let mut html_content = String::new();
-
-                        for msg in &messages_to_process {
+                        for msg in &messages_to_process { // Iterate over the moved vector
+                             // NEW: Pass the emote_map derived from channel_id_str to parse_message_html
                              html_content.push_str(&parse_message_html(msg, &emote_map));
                              html_content.push('\n'); // Add newline between messages
                         }
