@@ -1,13 +1,16 @@
 // main.rs
 
+// Import the correct gio for webkit6
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, TabOverview};
-use gtk::{gdk, ScrolledWindow, Button, ListBox, Label, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
+use gtk::{gdk, ScrolledWindow, Button, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
+use webkit6::WebView;
+use webkit6::prelude::WebViewExt;
 use std::sync::{Arc, Mutex};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
 use glib::clone;
-use gio::SimpleAction;
+use adw::gio::SimpleAction; // Use gio from adw to match versions
 use std::collections::HashMap;
 use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
@@ -25,7 +28,7 @@ use rlimit::{Resource};
 
 mod auth; // Assuming these modules exist
 mod emotes; // Assuming these modules exist
-use crate::emotes::{MESSAGE_CSS, get_emote_map, parse_message, cleanup_emote_cache, cleanup_media_file_cache};
+use crate::emotes::{MESSAGE_CSS, get_emote_map, parse_message_html, cleanup_emote_cache, cleanup_media_file_cache}; // Updated import
 
 // Connection state management
 #[derive(Debug, Clone)]
@@ -50,17 +53,11 @@ impl ClientState {
             join_handle: None,
         }
     }
-
     fn disconnect(&mut self) {
-        // Note: Dropping the client handle might be enough for disconnection in twitch-irc
-        // depending on how the library handles dropped handles. For explicit disconnection,
-        // you might need a method on the client itself if available.
-        // Here, we clear the client and join the thread.
         self.client = None;
         if let Some(handle) = self.join_handle.take() {
             handle.join().unwrap_or(());
         }
-        // Recreate the runtime for potential reconnection
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new().unwrap());
         }
@@ -74,10 +71,10 @@ struct Favorites {
     starred: Vec<String>, // List of starred channels
 }
 
-// Tab data structure
+// Tab data structure - Updated to use WebView
 struct TabData {
     page: TabPage,
-    listbox: ListBox,
+    webview: WebView, // Changed from ListBox
     stack: Stack,
     entry: Entry,
     channel_name: Arc<Mutex<Option<String>>>,
@@ -99,13 +96,8 @@ fn main() {
     // Check and potentially increase the file descriptor limit
     if let Ok((soft_limit, hard_limit)) = rlimit::getrlimit(rlimit::Resource::NOFILE) {
         println!("Current file descriptor limit: soft={}, hard={}", soft_limit, hard_limit);
-
-        // Decide on a new soft limit (ensure it doesn't exceed the hard limit)
-        // For example, setting it to the hard limit or a specific value within bounds
-        let new_soft_limit = hard_limit.min(1024); // Example: cap at 4096 or use the system hard limit
-
+        let new_soft_limit = hard_limit.min(1024);
         if new_soft_limit > soft_limit {
-            // Attempt to increase the soft limit up to the new value (or the hard limit, whichever is lower)
             if let Err(e) = rlimit::setrlimit(rlimit::Resource::NOFILE, new_soft_limit, hard_limit) {
                 eprintln!("Failed to increase file descriptor soft limit: {}", e);
             } else {
@@ -115,12 +107,11 @@ fn main() {
     } else {
         eprintln!("Failed to get current file descriptor limits using rlimit crate.");
     }
-
     app.connect_activate(build_ui);
     app.run();
 }
 
-// Favorites management functions
+// Favorites management functions (remain largely the same)
 fn get_favorites_path() -> std::path::PathBuf {
     let config_dir = shellexpand::tilde("~/.config/admiral").into_owned();
     std::path::PathBuf::from(config_dir).join("favorites.toml")
@@ -129,7 +120,6 @@ fn get_favorites_path() -> std::path::PathBuf {
 fn load_favorites() -> Favorites {
     let path = get_favorites_path();
     if !path.exists() {
-        // Create default file if it doesn't exist
         let favorites = Favorites::default();
         save_favorites(&favorites);
         return favorites;
@@ -145,7 +135,6 @@ fn load_favorites() -> Favorites {
 
 fn save_favorites(favorites: &Favorites) {
     let path = get_favorites_path();
-    // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("Failed to create config directory");
     }
@@ -158,7 +147,7 @@ fn add_favorite(channel: &str) {
     let channel_lower = channel.to_lowercase();
     if !favorites.channels.contains(&channel_lower) {
         favorites.channels.push(channel_lower);
-        favorites.channels.sort(); // Keep the list sorted
+        favorites.channels.sort();
         save_favorites(&favorites);
     }
 }
@@ -175,13 +164,11 @@ fn toggle_star(channel: &str) {
     let mut favorites = load_favorites();
     let channel_lower = channel.to_lowercase();
     if favorites.starred.contains(&channel_lower) {
-        // Remove from starred
         favorites.starred.retain(|c| c != &channel_lower);
     } else {
-        // Add to starred if it's in the favorites list
         if favorites.channels.contains(&channel_lower) {
             favorites.starred.push(channel_lower);
-            favorites.starred.sort(); // Keep starred sorted
+            favorites.starred.sort();
         }
     }
     save_favorites(&favorites);
@@ -193,16 +180,15 @@ fn is_starred(channel: &str) -> bool {
 }
 
 fn load_and_display_favorites(
-    list: &ListBox,
+    list: &gtk::ListBox, // Use fully qualified name to avoid ambiguity
     favorites_entry: &Entry,
-    favorites_list: &ListBox,
+    favorites_list: &gtk::ListBox, // Use fully qualified name
     tab_view: &TabView,
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
 ) {
-    // Clear existing items
+    // Implementation remains the same as before
     list.remove_all();
     let favorites = load_favorites();
-    // Separate starred and non-starred channels
     let mut starred_channels = Vec::new();
     let mut regular_channels = Vec::new();
     for channel in &favorites.channels {
@@ -212,11 +198,9 @@ fn load_and_display_favorites(
             regular_channels.push(channel.clone());
         }
     }
-    // Display starred channels first
     if !starred_channels.is_empty() {
-        // Add a header for starred channels
         let header_row = ListBoxRow::new();
-        let header_label = Label::new(Some("Starred Channels"));
+        let header_label = gtk::Label::new(Some("Starred Channels"));
         header_label.add_css_class("heading");
         header_row.set_child(Some(&header_label));
         header_row.set_selectable(false);
@@ -232,20 +216,17 @@ fn load_and_display_favorites(
                 &favorites_list,
             );
         }
-        // Replace the separator with a proper horizontal separator
         let separator = gtk::Separator::new(Orientation::Horizontal);
         separator.set_margin_top(8);
         separator.set_margin_bottom(8);
         separator.set_sensitive(false);
-        separator.set_opacity(0.4); // Optional: add slight visibility
+        separator.set_opacity(0.4);
         list.append(&separator);
     }
-    // Display regular channels
     if !regular_channels.is_empty() {
-        // Add a header for regular channels if there are starred channels
         if !starred_channels.is_empty() {
             let header_row = ListBoxRow::new();
-            let header_label = Label::new(Some("Favorites"));
+            let header_label = gtk::Label::new(Some("Favorites"));
             header_label.add_css_class("heading");
             header_row.set_child(Some(&header_label));
             header_row.set_selectable(false);
@@ -263,10 +244,9 @@ fn load_and_display_favorites(
             );
         }
     }
-    // Check if there are no favorites at all
     if favorites.channels.is_empty() {
         let empty_row = ListBoxRow::new();
-        let empty_label = Label::new(Some("No favorites yet"));
+        let empty_label = gtk::Label::new(Some("No favorites yet"));
         empty_label.add_css_class("dim-label");
         empty_row.set_child(Some(&empty_label));
         list.append(&empty_row);
@@ -274,65 +254,50 @@ fn load_and_display_favorites(
 }
 
 fn create_favorite_row(
-    list: &ListBox,
+    list: &gtk::ListBox, // Use fully qualified name
     channel: &str,
     is_starred: bool,
     tab_view: &TabView,
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
     favorites_entry: &Entry,
-    favorites_list: &ListBox,
+    favorites_list: &gtk::ListBox, // Use fully qualified name
 ) {
+    // Implementation remains the same as before
     let row = ListBoxRow::new();
     let content_box = Box::new(Orientation::Horizontal, 6);
     content_box.set_hexpand(true);
-
-    // Channel name label
-    let channel_label = Label::builder()
+    let channel_label = gtk::Label::builder()
         .label(channel)
         .halign(Align::Start)
-        .valign(Align::Center)
+        .valign(gtk::Align::Center)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
-
-    // Star button
     let star_icon = if is_starred { "starred-symbolic" } else { "non-starred-symbolic" };
     let star_tooltip = if is_starred { "Unstar channel" } else { "Star channel" };
     let star_button = Button::builder()
         .icon_name(star_icon)
         .tooltip_text(star_tooltip)
         .build();
-
-    // Trash button
     let trash_button = Button::builder()
         .icon_name("user-trash-symbolic")
         .tooltip_text("Remove from favorites")
         .build();
-
-    // RIGHT-ALIGN BUTTONS: Add label, then a spacer, then buttons
     content_box.append(&channel_label);
-    // Spacer that expands to push buttons to the right
     let spacer = Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     content_box.append(&spacer);
-    // Buttons (now right-aligned)
     content_box.append(&star_button);
     content_box.append(&trash_button);
-
     row.set_child(Some(&content_box));
     row.set_selectable(true);
-    row.set_activatable(true); // Ensure it's activatable
-
-    // ===== ROW CLICK: Open tab and connect =====
+    row.set_activatable(true);
     let channel_clone = channel.to_string();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
-
-    // Create a gesture click handler instead of using activate
     let gesture = gtk::GestureClick::new();
     gesture.connect_released(move |_, _, _, _| {
         println!("Row clicked for channel: {}", channel_clone);
         create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
-        // Small delay to ensure tab is fully created
         let tab_view_clone2 = tab_view_clone.clone();
         let tabs_clone2 = tabs_clone.clone();
         let channel_clone2 = channel_clone.clone();
@@ -356,8 +321,6 @@ fn create_favorite_row(
         });
     });
     row.add_controller(gesture);
-
-    // ===== STAR BUTTON =====
     let channel_clone = channel.to_string();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
@@ -373,8 +336,6 @@ fn create_favorite_row(
             &tabs_clone,
         );
     });
-
-    // ===== TRASH BUTTON =====
     let channel_clone = channel.to_string();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
@@ -390,7 +351,6 @@ fn create_favorite_row(
             &tabs_clone,
         );
     });
-
     row.add_css_class("compact-row");
     list.append(&row);
 }
@@ -398,21 +358,12 @@ fn create_favorite_row(
 /// Centralized disconnect handler - properly cleans up tab resources
 fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
     println!("Disconnecting tab...");
-
-    // Update the tab's connection state
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
-
-    // Trigger disconnection logic in the client state
     tab_data.client_state.lock().unwrap().disconnect();
-
-    // Clear the chat display and show the placeholder
-    tab_data.listbox.remove_all();
+    // Clear the WebView content instead of ListBox
+    tab_data.webview.load_html("", None);
     tab_data.stack.set_visible_child_name("placeholder");
-
-    // Reset the tab title
     tab_data.page.set_title("New Tab");
-
-    // Clear the channel name
     *tab_data.channel_name.lock().unwrap() = None;
 }
 
@@ -424,7 +375,7 @@ fn build_ui(app: &Application) {
         .default_height(600)
         .build();
 
-    // CSS management (init once)
+    // CSS management (init once) - Apply to WebViews if needed via UserScript
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_data(MESSAGE_CSS);
     if let Some(display) = gdk::Display::default() {
@@ -435,7 +386,6 @@ fn build_ui(app: &Application) {
         );
     }
 
-    // Create TabView and TabBar
     let tab_view = TabView::builder()
         .vexpand(true)
         .build();
@@ -445,35 +395,28 @@ fn build_ui(app: &Application) {
         .build();
     tab_bar.add_css_class("inline");
 
-    // Create HeaderBar
     let header = HeaderBar::builder()
         .build();
 
-    // === FAVORITES POPOVER IMPLEMENTATION ===
-    // Create favorites button (placed in HeaderBar, left-justified)
     let favorites_button = GtkButton::builder()
         .icon_name("non-starred-symbolic")
         .tooltip_text("Favorites")
         .build();
 
-    // Create popover content
     let popover = Popover::builder()
         .autohide(true)
         .build();
 
-    // Create content for the popover
     let popover_content = Box::new(Orientation::Vertical, 6);
     popover_content.set_margin_top(6);
     popover_content.set_margin_bottom(6);
     popover_content.set_margin_start(6);
     popover_content.set_margin_end(6);
 
-    // Entry for adding new favorites
     let favorites_entry = Entry::builder()
         .placeholder_text("Add channel to favorites")
         .build();
 
-    // Button to add the channel
     let add_favorite_button = GtkButton::builder()
         .label("Add")
         .build();
@@ -483,8 +426,7 @@ fn build_ui(app: &Application) {
     favorites_entry_box.append(&add_favorite_button);
     popover_content.append(&favorites_entry_box);
 
-    // Scrolled window for favorites list
-    let favorites_list = ListBox::builder()
+    let favorites_list = gtk::ListBox::builder() // Use fully qualified name
         .vexpand(true)
         .build();
     let favorites_scrolled = ScrolledWindow::builder()
@@ -496,39 +438,28 @@ fn build_ui(app: &Application) {
 
     popover.set_child(Some(&popover_content));
 
-    // Store clones for the button and popover
     let favorites_button_clone = favorites_button.clone();
     let popover_clone = popover.clone();
-
-    // Connect the button to show the popover
     favorites_button.connect_clicked(move |_| {
-        // This is the critical fix: set the parent before showing
         popover_clone.set_parent(&favorites_button_clone);
         popover_clone.popup();
     });
 
-    // Add the favorites button to the start of the header bar (left side)
     header.pack_start(&favorites_button);
 
-    // === END FAVORITES POPOVER IMPLEMENTATION ===
-
-    // Add tab button (placed in HeaderBar)
     let add_tab_button = GtkButton::builder()
         .icon_name("list-add-symbolic")
         .tooltip_text("Add new tab")
         .build();
 
-    // Overview button (placed in HeaderBar)
     let overview_button = GtkButton::builder()
         .icon_name("view-grid-symbolic")
         .tooltip_text("Tab overview")
         .build();
 
-    // Pack buttons into the HeaderBar
     header.pack_end(&add_tab_button);
     header.pack_end(&overview_button);
 
-    // Create TabOverview
     let tab_overview = TabOverview::builder()
         .view(&tab_view)
         .child(&tab_view)
@@ -536,58 +467,70 @@ fn build_ui(app: &Application) {
         .show_end_title_buttons(false)
         .build();
 
-    // Main content container
     let content = Box::new(Orientation::Vertical, 0);
     content.append(&header);
     content.append(&tab_bar);
     content.append(&tab_overview);
 
-    // Store all tabs
     let tabs: Arc<Mutex<HashMap<String, Arc<TabData>>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Add tab button handler
-    add_tab_button.connect_clicked(clone!(@strong tab_view, @strong tabs => move |_| {
-        create_new_tab("New Tab", &tab_view, &tabs);
-    }));
+    add_tab_button.connect_clicked(clone!(
+        #[strong]
+        tab_view,
+        #[strong]
+        tabs,
+        move |_| {
+            create_new_tab("New Tab", &tab_view, &tabs);
+        }
+    ));
 
-    // Favorites button handlers
     let tabs_clone = tabs.clone();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
-    add_favorite_button.connect_clicked(clone!(@strong favorites_list_clone, @strong favorites_entry_clone, @strong tab_view, @strong tabs_clone => move |_| {
-        let channel = favorites_entry_clone.text().to_string();
-        if !channel.is_empty() {
-            add_favorite(&channel);
-            favorites_entry_clone.set_text("");
-            load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone, &tab_view, &tabs_clone);
+    add_favorite_button.connect_clicked(clone!(
+        #[strong]
+        favorites_list_clone,
+        #[strong]
+        favorites_entry_clone,
+        #[strong]
+        tab_view,
+        #[strong]
+        tabs_clone,
+        move |_| {
+            let channel = favorites_entry_clone.text().to_string();
+            if !channel.is_empty() {
+                add_favorite(&channel);
+                favorites_entry_clone.set_text("");
+                load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone, &tab_view, &tabs_clone);
+            }
         }
-    }));
+    ));
 
-    // Connect the entry to the add button (Enter key)
-    favorites_entry_clone.connect_activate(clone!(@strong add_favorite_button => move |_| {
-        add_favorite_button.emit_clicked();
-    }));
+    favorites_entry_clone.connect_activate(clone!(
+        #[strong]
+        add_favorite_button,
+        move |_| {
+            add_favorite_button.emit_clicked();
+        }
+    ));
 
-    // Load initial favorites
     load_and_display_favorites(&favorites_list, &favorites_entry, &favorites_list, &tab_view, &tabs);
 
-    // Overview button handler
-    overview_button.connect_clicked(clone!(@strong tab_overview => move |_| {
-        tab_overview.set_open(true);
-    }));
+    overview_button.connect_clicked(clone!(
+        #[strong]
+        tab_overview,
+        move |_| {
+            tab_overview.set_open(true);
+        }
+    ));
 
-    // Create initial tab
     create_new_tab("New Tab", &tab_view, &tabs);
 
-    // Handle tab close events - THIS IS THE KEY FIX
     let tabs_for_close = tabs.clone();
     tab_view.connect_close_page(move |_tab_view, page| {
         println!("Tab close requested");
-
-        // Find and disconnect the tab being closed
         let tabs_map = tabs_for_close.lock().unwrap();
         let mut tab_id_to_remove = None;
-
         for (tab_id, tab_data) in tabs_map.iter() {
             if &tab_data.page == page {
                 println!("Found tab to disconnect: {}", tab_id);
@@ -596,25 +539,19 @@ fn build_ui(app: &Application) {
                 break;
             }
         }
-
-        drop(tabs_map); // Release lock before removal
-
-        // Remove the tab from the HashMap
+        drop(tabs_map);
         if let Some(tab_id) = tab_id_to_remove {
             tabs_for_close.lock().unwrap().remove(&tab_id);
             println!("Removed tab from HashMap: {}", tab_id);
         }
-
-        // Allow the close to proceed
         glib::Propagation::Proceed
     });
 
-    // Message processing timer - Batch processing
+    // Message processing timer - Batch processing for WebView
     let tabs_clone = tabs.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let tabs_map = tabs_clone.lock().unwrap();
         for (_, tab_data) in tabs_map.iter() {
-            // Handle errors
             let error_rx = tab_data.error_rx.lock().unwrap();
             loop {
                 match error_rx.try_recv() {
@@ -627,8 +564,6 @@ fn build_ui(app: &Application) {
                     Err(TryRecvError::Disconnected) => break,
                 }
             }
-
-            // Batch collect messages from the channel
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
             loop {
@@ -638,41 +573,50 @@ fn build_ui(app: &Application) {
                     Err(TryRecvError::Disconnected) => break,
                 }
             }
-            drop(rx); // Release the lock before scheduling UI updates
+            drop(rx);
 
-            // If there are messages to process, schedule a batch UI update
             if !messages_to_process.is_empty() {
-                let listbox = tab_data.listbox.clone();
-                idle_add_local(move || {
-                    // Process the batch of messages
-                    for msg in &messages_to_process {
-                        let channelid = msg.channel_id.clone();
-                        let emote_map = get_emote_map(&channelid);
-                        let row = parse_message(&msg, &emote_map);
-                        listbox.prepend(&row);
+                let webview = tab_data.webview.clone();
+                let channelid = tab_data.channel_name.lock().unwrap().clone(); // Get channel ID for emote map
+                if let Some(channel_id_str) = channelid {
+                    idle_add_local(move || {
+                        let emote_map = get_emote_map(&channel_id_str); // Fetch emote map for the specific channel
 
-                        // Apply buffer limit after adding messages
-                        let max_messages = 50; // Reduced buffer size
-                        let row_count = listbox.observe_children().n_items();
-                        if row_count > max_messages as u32 {
-                            // Remove excess messages from the bottom (oldest)
-                            while listbox.observe_children().n_items() > max_messages as u32 {
-                                if let Some(last_row) = listbox.last_child() {
-                                    listbox.remove(&last_row);
-                                } else {
-                                    break; // Shouldn't happen if n_items > 0, but just in case
-                                }
-                            }
+                        let mut html_content = String::new();
+
+                        for msg in &messages_to_process {
+                             html_content.push_str(&parse_message_html(msg, &emote_map));
+                             html_content.push('\n'); // Add newline between messages
                         }
-                    }
-                    ControlFlow::Break // Only run the idle callback once per batch
-                });
+
+                        // Properly escape for JavaScript string literal
+                        let escaped_html = html_content
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n")
+                            .replace('\r', "\\r");
+
+                        let js_code = format!(
+                            r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
+                            escaped_html
+                        );
+
+                        // For webkit6, use evaluate_javascript instead of run_javascript
+                        // Parameters: javascript, length (None for null-terminated), source_uri, cancellable, callback
+                        webview.evaluate_javascript(&js_code, None, None, None::<&adw::gio::Cancellable>, |result| {
+                            if let Err(e) = result {
+                                eprintln!("Error running JS: {}", e);
+                            }
+                        });
+
+                        ControlFlow::Break
+                    });
+                } // End if let Some(channel_id_str)
             }
         }
         glib::ControlFlow::Continue
     });
 
-    // Emote cache cleanup timer
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
         cleanup_media_file_cache();
@@ -680,7 +624,6 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
-    // Action for creating a new tab (Ctrl+T)
     let new_tab_action = SimpleAction::new("new-tab", None);
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
@@ -689,7 +632,6 @@ fn build_ui(app: &Application) {
     });
     window.add_action(&new_tab_action);
 
-    // Action for closing the selected tab (Ctrl+W)
     let close_tab_action = SimpleAction::new("close-tab", None);
     let tab_view_close = tab_view.clone();
     close_tab_action.connect_activate(move |_, _| {
@@ -699,13 +641,11 @@ fn build_ui(app: &Application) {
     });
     window.add_action(&close_tab_action);
 
-    // Set the accelerators
     app.set_accels_for_action("win.new-tab", &["<Control>t"]);
     app.set_accels_for_action("win.close-tab", &["<Control>w"]);
 
     window.set_content(Some(&content));
 
-    // Quit action - THIS IS THE KEY FIX FOR APPLICATION SHUTDOWN
     let quit_action = SimpleAction::new("quit", None);
     let tabs_quit = tabs.clone();
     quit_action.connect_activate(move |_, _| {
@@ -716,15 +656,12 @@ fn build_ui(app: &Application) {
             disconnect_tab_handler(tab_data);
         }
         drop(tabs_map);
-
-        // Clear the HashMap
         tabs_quit.lock().unwrap().clear();
         println!("All tabs disconnected and cleared");
     });
     window.add_action(&quit_action);
     app.set_accels_for_action("win.quit", &["<Control>q"]);
 
-    // Handle window close button properly
     let tabs_for_window_close = tabs.clone();
     window.connect_close_request(move |_window| {
         println!("Window close button clicked");
@@ -734,16 +671,11 @@ fn build_ui(app: &Application) {
             disconnect_tab_handler(tab_data);
         }
         drop(tabs_map);
-
-        // Clear the HashMap
         tabs_for_window_close.lock().unwrap().clear();
         println!("All tabs disconnected on window close");
-
-        // Allow the window to close
         glib::Propagation::Proceed
     });
 
-    // Start monitoring tab count to control tab bar visibility
     let tab_view_monitor = tab_view.clone();
     let tab_bar_monitor = tab_bar.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
@@ -759,37 +691,148 @@ fn create_new_tab(
     tab_view: &TabView,
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
 ) {
-    // Create the tab content container
     let tab_content = Box::new(Orientation::Vertical, 0);
 
-    // Create entry and connect button for this tab
     let entry_box = Box::new(Orientation::Horizontal, 6);
     entry_box.set_margin_top(6);
     entry_box.set_margin_bottom(6);
     entry_box.set_margin_start(6);
     entry_box.set_margin_end(6);
-
     let entry = Entry::builder()
         .placeholder_text("Enter channel name")
         .hexpand(true)
         .build();
-
     let connect_button = GtkButton::builder()
         .label("Connect")
         .build();
-
     entry_box.append(&entry);
     entry_box.append(&connect_button);
 
-    // Create listbox for chat messages
-    let listbox = ListBox::builder().build();
+    // Create WebView for chat display
+    let webview = WebView::new();
+    webview.set_vexpand(true);
+    webview.set_hexpand(true);
+
+    // Set WebView to use transparent background and match GTK theme
+    webview.set_background_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
+
+    // Inject initial HTML and JavaScript with theme-aware styling
+    let initial_html = r#"
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            font-family: sans-serif;
+            background-color: transparent;
+            color: inherit;
+        }
+        #chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+        .message-box {
+            border: 1px solid rgba(153, 153, 153, 0.3);
+            border-radius: 8px;
+            padding: 8px;
+            margin-bottom: 4px;
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+        .message-header { display: flex; justify-content: space-between; }
+        .sender { font-weight: bold; }
+        .timestamp { color: rgba(170, 170, 170, 0.8); font-size: 0.8em; }
+        .message-content {
+            margin-top: 4px;
+            word-wrap: break-word;
+            line-height: 28px;
+        }
+        .message-content img {
+            height: 28px;
+            width: auto;
+            vertical-align: middle;
+            display: inline-block;
+            margin: 0 2px;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { color: #ffffff; }
+        }
+        @media (prefers-color-scheme: light) {
+            body { color: #000000; }
+            .message-box { background-color: rgba(0, 0, 0, 0.02); }
+        }
+      </style>
+    </head>
+    <body>
+    <div id="chat-container">
+      <div id="chat-body"></div>
+    </div>
+    <script>
+      let isUserScrolling = false;
+      let scrollTimeout = null;
+      const chatContainer = document.getElementById('chat-container');
+      const MAX_MESSAGES = 100;
+
+      // Detect if user is manually scrolling
+      chatContainer.addEventListener('scroll', function() {
+        const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
+        isUserScrolling = !isAtBottom;
+
+        // Reset after 2 seconds of no scrolling
+        clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+          isUserScrolling = false;
+        }, 2000);
+      });
+
+      function appendMessages(htmlString) {
+        var chatBody = document.getElementById('chat-body');
+        var tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlString;
+
+        while (tempDiv.firstChild) {
+          chatBody.appendChild(tempDiv.firstChild);
+        }
+
+        // Remove old messages if we exceed the limit
+        var messages = chatBody.getElementsByClassName('message-box');
+        while (messages.length > MAX_MESSAGES) {
+          chatBody.removeChild(messages[0]);
+        }
+
+        // Only auto-scroll if user isn't manually scrolling
+        if (!isUserScrolling) {
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+      }
+
+      // Initial scroll to bottom
+      window.onload = function() {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      };
+    </script>
+    </body>
+    </html>
+    "#;
+
+    webview.load_html(initial_html, None);
+
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
-        .child(&listbox)
+        .child(&webview) // Use WebView instead of ScrolledWindow(ListBox)
         .build();
 
-    // Create placeholder content for when not connected
     let placeholder_box = Box::new(Orientation::Vertical, 12);
     placeholder_box.set_valign(Align::Center);
     placeholder_box.set_halign(Align::Center);
@@ -797,50 +840,41 @@ fn create_new_tab(
     placeholder_box.set_margin_bottom(60);
     placeholder_box.set_margin_start(40);
     placeholder_box.set_margin_end(40);
-
-    let main_label = Label::new(Some("Choose a channel"));
+    let main_label = gtk::Label::new(Some("Choose a channel"));
     main_label.set_css_classes(&["title-1"]);
     main_label.set_halign(Align::Center);
-
-    let subtitle_label = Label::new(Some("Type a channel name in the entry above"));
+    let subtitle_label = gtk::Label::new(Some("Type a channel name in the entry above"));
     subtitle_label.set_css_classes(&["dim-label"]);
     subtitle_label.set_halign(Align::Center);
-
     placeholder_box.append(&main_label);
     placeholder_box.append(&subtitle_label);
 
-    // Create stack to switch between placeholder and chat view
     let stack = Stack::builder()
         .vexpand(true)
         .hexpand(true)
         .build();
     stack.add_named(&placeholder_box, Some("placeholder"));
-    stack.add_named(&scrolled_window, Some("chat"));
+    stack.add_named(&scrolled_window, Some("chat")); // Show WebView in chat view
     stack.set_visible_child_name("placeholder");
 
-    // Add components to the tab's content area
     tab_content.append(&entry_box);
     tab_content.append(&stack);
 
-    // Append the new content area as a page to the TabView
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    // Create channels for this specific tab to receive messages/errors
     let (tx, rx) = mpsc::channel();
     let (error_tx, error_rx) = mpsc::channel();
 
-    // Generate a unique identifier for this tab using timestamp + counter
     let tab_count = tabs.lock().unwrap().len();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
     let tab_id = format!("tab_{}_{}", timestamp, tab_count);
-
     let tab_data = TabData {
         page: page.clone(),
-        listbox: listbox.clone(),
+        webview: webview.clone(), // Store WebView
         stack: stack.clone(),
         entry: entry.clone(),
         channel_name: Arc::new(Mutex::new(None)),
@@ -851,39 +885,40 @@ fn create_new_tab(
         error_tx,
         error_rx: Arc::new(Mutex::new(error_rx)),
     };
-
     let tab_data_arc = Arc::new(tab_data);
     tabs.lock().unwrap().insert(tab_id.clone(), tab_data_arc.clone());
     println!("Created new tab with id: {}", tab_id);
 
-    // Connect the connect/disconnect button for this specific tab
-    connect_button.connect_clicked(clone!(@strong tab_data_arc => move |_| {
-        let channel_name = tab_data_arc.entry.text().to_string();
-        if channel_name.is_empty() {
-            // If entry is empty, disconnect the current tab
-            disconnect_tab_handler(&tab_data_arc);
-            return;
-        }
-        let current_state = tab_data_arc.connection_state.lock().unwrap().clone();
-        match current_state {
-            ConnectionState::Connected(_) => {
-                // If already connected, disconnect first, then connect to the new channel
+    connect_button.connect_clicked(clone!(
+        #[strong]
+        tab_data_arc,
+        move |_| {
+            let channel_name = tab_data_arc.entry.text().to_string();
+            if channel_name.is_empty() {
                 disconnect_tab_handler(&tab_data_arc);
-                start_connection_for_tab(&channel_name, &tab_data_arc);
-            },
-            ConnectionState::Disconnected | ConnectionState::Connecting => {
-                // If disconnected or connecting, try to connect
-                start_connection_for_tab(&channel_name, &tab_data_arc);
+                return;
+            }
+            let current_state = tab_data_arc.connection_state.lock().unwrap().clone();
+            match current_state {
+                ConnectionState::Connected(_) => {
+                    disconnect_tab_handler(&tab_data_arc);
+                    start_connection_for_tab(&channel_name, &tab_data_arc);
+                },
+                ConnectionState::Disconnected | ConnectionState::Connecting => {
+                    start_connection_for_tab(&channel_name, &tab_data_arc);
+                }
             }
         }
-    }));
+    ));
 
-    // Allow pressing Enter in the entry to trigger the connect button
-    entry.connect_activate(clone!(@strong connect_button => move |_| {
-        connect_button.emit_clicked();
-    }));
+    entry.connect_activate(clone!(
+        #[strong]
+        connect_button,
+        move |_| {
+            connect_button.emit_clicked();
+        }
+    ));
 
-    // Switch to the newly created tab
     tab_view.set_selected_page(&page);
 }
 
@@ -891,20 +926,120 @@ fn start_connection_for_tab(
     channel: &str,
     tab_data: &Arc<TabData>
 ) {
-    // Update connection state to Connecting
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
-
-    // Store the channel name being connected to
     *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
+    // Clear WebView content and show chat view with theme-aware HTML
+    let initial_html_with_js = r#"
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            font-family: sans-serif;
+            background-color: transparent;
+            color: inherit;
+        }
+        #chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+        .message-box {
+            border: 1px solid rgba(153, 153, 153, 0.3);
+            border-radius: 8px;
+            padding: 8px;
+            margin-bottom: 4px;
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+        .message-header { display: flex; justify-content: space-between; }
+        .sender { font-weight: bold; }
+        .timestamp { color: rgba(170, 170, 170, 0.8); font-size: 0.8em; }
+        .message-content {
+            margin-top: 4px;
+            word-wrap: break-word;
+            line-height: 28px;
+        }
+        .message-content img {
+            height: 28px;
+            width: auto;
+            vertical-align: middle;
+            display: inline-block;
+            margin: 0 2px;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { color: #ffffff; }
+        }
+        @media (prefers-color-scheme: light) {
+            body { color: #000000; }
+            .message-box { background-color: rgba(0, 0, 0, 0.02); }
+        }
+      </style>
+    </head>
+    <body>
+    <div id="chat-container">
+      <div id="chat-body"></div>
+    </div>
+    <script>
+      let isUserScrolling = false;
+      let scrollTimeout = null;
+      const chatContainer = document.getElementById('chat-container');
+      const MAX_MESSAGES = 100;
 
-    // Clear previous messages and show the chat view
-    tab_data.listbox.remove_all();
+      // Detect if user is manually scrolling
+      chatContainer.addEventListener('scroll', function() {
+        const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
+        isUserScrolling = !isAtBottom;
+
+        // Reset after 2 seconds of no scrolling
+        clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+          isUserScrolling = false;
+        }, 2000);
+      });
+
+      function appendMessages(htmlString) {
+        var chatBody = document.getElementById('chat-body');
+        var tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlString;
+
+        while (tempDiv.firstChild) {
+          chatBody.appendChild(tempDiv.firstChild);
+        }
+
+        // Remove old messages if we exceed the limit
+        var messages = chatBody.getElementsByClassName('message-box');
+        while (messages.length > MAX_MESSAGES) {
+          chatBody.removeChild(messages[0]);
+        }
+
+        // Only auto-scroll if user isn't manually scrolling
+        if (!isUserScrolling) {
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+      }
+
+      // Initial scroll to bottom
+      window.onload = function() {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      };
+    </script>
+    </body>
+    </html>
+    "#;
+    tab_data.webview.load_html(initial_html_with_js, None);
     tab_data.stack.set_visible_child_name("chat");
-
-    // Update the tab's title to reflect the connected channel
     tab_data.page.set_title(channel);
 
-    // Extract necessary data for the thread
     let channel = channel.to_string();
     let connection_state = tab_data.connection_state.clone();
     let client_state_thread = tab_data.client_state.clone();
@@ -912,48 +1047,40 @@ fn start_connection_for_tab(
     let tx = tab_data.tx.clone();
     let error_tx = tab_data.error_tx.clone();
 
-    // Take the runtime from the stored state to move into the thread
     let mut state = tab_data.client_state.lock().unwrap();
     let runtime = state.runtime.take().unwrap();
     drop(state);
 
-    // Spawn the connection thread
     let handle = thread::spawn(move || {
         runtime.block_on(async move {
             let config = ClientConfig::default();
             let (mut incoming_messages, client) = TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
 
-            // Attempt to join the specified channel
             if let Err(e) = client.join(channel.clone()) {
                 eprintln!("Failed to join channel '{}': {}", channel, e);
-                let _ = error_tx.send(()); // Signal an error to the main thread
+                let _ = error_tx.send(());
                 return;
             }
 
-            // Store the client handle so it can be managed (e.g., disconnected later)
             {
                 let mut state = client_state_thread.lock().unwrap();
                 state.client = Some(client);
             }
 
-            // Update connection state to Connected
             {
                 let mut state = connection_state.lock().unwrap();
                 *state = ConnectionState::Connected(channel.clone());
             }
 
-            // Main message loop
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    // Send the received message to the main thread for UI update
                     if tx.send(msg.clone()).is_err() {
                         eprintln!("Failed to send message to UI thread, channel might be closed");
-                        break; // Exit the loop if sending fails
+                        break;
                     }
                 }
             }
 
-            // Update connection state back to Disconnected when the loop ends (e.g., due to error or disconnection)
             {
                 let mut state = connection_state.lock().unwrap();
                 if matches!(*state, ConnectionState::Connected(ref c) if c == &channel) {
@@ -963,7 +1090,6 @@ fn start_connection_for_tab(
         });
     });
 
-    // Store the join handle so we can wait for it later if needed (e.g., on app quit)
     {
         let mut state = client_state_store.lock().unwrap();
         state.join_handle = Some(handle);

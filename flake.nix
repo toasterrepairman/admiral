@@ -39,6 +39,7 @@
         git
         wrapGAppsHook4
         libsecret
+        webkitgtk_6_0.dev
         # llvmPackages.libclang
         #
         # cudaPackages.cuda_nvcc
