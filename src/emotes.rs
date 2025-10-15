@@ -85,16 +85,31 @@ struct ImageFile {
     format: String, // Format (e.g., "WEBP", "PNG", "GIF")
 }
 
-// --- Cache Cleanup Functions (Still relevant for in-memory maps) ---
 pub fn cleanup_emote_cache() {
     let mut last_fetch = LAST_FETCH_TIME.write().unwrap();
     let now = Instant::now();
-    last_fetch.retain(|_, time| now.duration_since(*time) < Duration::from_secs(3600)); // 1 hour
 
-    let mut emote_maps = EMOTE_MAPS.write().unwrap();
-    // Potentially remove maps for channels not recently accessed if needed
-    // For now, just keep the fetch time cleanup.
-    println!("Cleaned up fetch time cache, {} entries remaining.", last_fetch.len());
+    // Collect channels to remove
+    let channels_to_remove: Vec<String> = last_fetch
+        .iter()
+        .filter_map(|(channel_id, time)| {
+            if now.duration_since(*time) >= Duration::from_secs(3600) {
+                Some(channel_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Remove from all caches
+    for channel_id in channels_to_remove {
+        last_fetch.remove(&channel_id);
+        EMOTE_MAPS.write().unwrap().remove(&channel_id);
+        DOWNLOADING_CHANNELS.write().unwrap().remove(&channel_id);
+        println!("Removed emote data for inactive channel: {}", channel_id);
+    }
+
+    println!("Cleaned up cache, {} channels remaining.", last_fetch.len());
 }
 
 pub fn cleanup_media_file_cache() {

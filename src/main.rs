@@ -71,16 +71,15 @@ struct Favorites {
     starred: Vec<String>, // List of starred channels
 }
 
-// Tab data structure - Updated to use WebView
 struct TabData {
     page: TabPage,
-    webview: WebView, // Changed from ListBox
+    webview: WebView,
     stack: Stack,
     entry: Entry,
     channel_name: Arc<Mutex<Option<String>>>,
     client_state: Arc<Mutex<ClientState>>,
     connection_state: Arc<Mutex<ConnectionState>>,
-    tx: std::sync::mpsc::Sender<twitch_irc::message::PrivmsgMessage>,
+    tx: std::sync::mpsc::SyncSender<twitch_irc::message::PrivmsgMessage>, // Changed to SyncSender
     rx: Arc<Mutex<std::sync::mpsc::Receiver<twitch_irc::message::PrivmsgMessage>>>,
     error_tx: std::sync::mpsc::Sender<()>,
     error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
@@ -355,16 +354,27 @@ fn create_favorite_row(
     list.append(&row);
 }
 
-/// Centralized disconnect handler - properly cleans up tab resources
 fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
     println!("Disconnecting tab...");
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
     tab_data.client_state.lock().unwrap().disconnect();
-    // Clear the WebView content instead of ListBox
-    tab_data.webview.load_html("", None);
+
+    // Load a data URI to clear content without fetching anything
+    tab_data.webview.load_uri("about:blank");
+
+    // Alternatively, reload empty HTML to force a fresh context
+    tab_data.webview.load_html("<!DOCTYPE html><html><head></head><body></body></html>", None);
+
     tab_data.stack.set_visible_child_name("placeholder");
     tab_data.page.set_title("New Tab");
     *tab_data.channel_name.lock().unwrap() = None;
+
+    // Drain message queue
+    let rx = tab_data.rx.lock().unwrap();
+    while rx.try_recv().is_ok() {
+        // Discard messages
+    }
+    drop(rx);
 }
 
 fn build_ui(app: &Application) {
@@ -377,7 +387,7 @@ fn build_ui(app: &Application) {
 
     // CSS management (init once) - Apply to WebViews if needed via UserScript
     let css_provider = gtk::CssProvider::new();
-    css_provider.load_from_data(MESSAGE_CSS);
+    css_provider.load_from_string(MESSAGE_CSS); // Use load_from_string instead
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -552,11 +562,17 @@ fn build_ui(app: &Application) {
         let tabs_map = tabs_clone.lock().unwrap();
         for (_, tab_data) in tabs_map.iter() {
             // ... error handling loop ...
+            // In the message receiving loop
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
+            const MAX_BATCH_SIZE: usize = 50; // Limit batch processing
+
             loop {
+                if messages_to_process.len() >= MAX_BATCH_SIZE {
+                    break; // Process what we have, don't accumulate more
+                }
                 match rx.try_recv() {
-                    Ok(msg) => messages_to_process.push(msg), // msg is PrivmsgMessage
+                    Ok(msg) => messages_to_process.push(msg),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
                 }
@@ -856,7 +872,7 @@ fn create_new_tab(
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(100); // This is correct - bounded channel
     let (error_tx, error_rx) = mpsc::channel();
 
     let tab_count = tabs.lock().unwrap().len();
@@ -961,6 +977,7 @@ fn start_connection_for_tab(
             margin-top: 4px;
             word-wrap: break-word;
             line-height: 28px;
+            font-weight: light;
         }
         .message-content img {
             height: 28px;
@@ -1065,11 +1082,16 @@ fn start_connection_for_tab(
                 *state = ConnectionState::Connected(channel.clone());
             }
 
+            // Around line 1010-1020 in the async block
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    if tx.send(msg.clone()).is_err() {
-                        eprintln!("Failed to send message to UI thread, channel might be closed");
-                        break;
+                    // SyncSender will block if channel is full, preventing unbounded growth
+                    match tx.send(msg.clone()) {
+                        Ok(_) => {},
+                        Err(e) => {
+                            eprintln!("Failed to send message to UI thread: {}", e);
+                            break;
+                        }
                     }
                 }
             }
