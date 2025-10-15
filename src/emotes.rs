@@ -340,7 +340,6 @@ pub fn parse_message_html(msg: &PrivmsgMessage, emote_map: &HashMap<String, Stri
     // Process message text to replace emotes with <img> tags
     let words: Vec<&str> = msg.message_text.split_whitespace().collect();
     let mut html_parts = Vec::new();
-
     for word in words {
         if let Some(remote_url) = emote_map.get(word) { // Look up remote URL
             // It's an emote, add the <img> tag with the remote URL

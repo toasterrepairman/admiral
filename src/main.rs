@@ -558,71 +558,86 @@ fn build_ui(app: &Application) {
     });
 
     let tabs_clone = tabs.clone();
+    let tab_view_for_processing = tab_view.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let tabs_map = tabs_clone.lock().unwrap();
-        for (_, tab_data) in tabs_map.iter() {
-            // ... error handling loop ...
-            // In the message receiving loop
-            let mut messages_to_process = Vec::new();
-            let rx = tab_data.rx.lock().unwrap();
-            const MAX_BATCH_SIZE: usize = 50; // Limit batch processing
 
-            loop {
-                if messages_to_process.len() >= MAX_BATCH_SIZE {
-                    break; // Process what we have, don't accumulate more
+        // Only process the currently selected tab
+        if let Some(selected_page) = tab_view_for_processing.selected_page() {
+            for (_, tab_data) in tabs_map.iter() {
+                if tab_data.page != selected_page {
+                    continue; // Skip inactive tabs
                 }
-                match rx.try_recv() {
-                    Ok(msg) => messages_to_process.push(msg),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
+
+                let mut messages_to_process = Vec::new();
+                let rx = tab_data.rx.lock().unwrap();
+                const MAX_BATCH_SIZE: usize = 20; // Reduce batch size
+
+                loop {
+                    if messages_to_process.len() >= MAX_BATCH_SIZE {
+                        break;
+                    }
+                    match rx.try_recv() {
+                        Ok(msg) => messages_to_process.push(msg),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => break,
+                    }
                 }
-            }
-            drop(rx);
-            if !messages_to_process.is_empty() {
-                let webview = tab_data.webview.clone();
-                // NEW: Extract channel_id from the first message BEFORE moving messages_to_process
-                // This assumes all messages in the batch are from the same channel.
-                // The channel_id field in PrivmsgMessage should be the unique identifier.
-                let channel_id_for_closure = messages_to_process
-                    .first()
-                    .map(|msg| msg.channel_id.clone()); // Clone the String
+                drop(rx);
 
-                if let Some(channel_id_str) = channel_id_for_closure { // Check if extraction succeeded
-                    idle_add_local(move || { // Now move messages_to_process into the closure
-                        // NEW: Pass the extracted channel_id string to get_emote_map
-                        let emote_map = get_emote_map(&channel_id_str); // Use the channel_id string
-                        let mut html_content = String::new();
-                        for msg in &messages_to_process { // Iterate over the moved vector
-                             // NEW: Pass the emote_map derived from channel_id_str to parse_message_html
-                             html_content.push_str(&parse_message_html(msg, &emote_map));
-                             html_content.push('\n'); // Add newline between messages
-                        }
+                if !messages_to_process.is_empty() {
+                    let webview = tab_data.webview.clone();
+                    let channel_id_for_closure = messages_to_process
+                        .first()
+                        .map(|msg| msg.channel_id.clone());
 
-                        // Properly escape for JavaScript string literal
-                        let escaped_html = html_content
-                            .replace('\\', "\\\\")
-                            .replace('\'', "\\'")
-                            .replace('\n', "\\n")
-                            .replace('\r', "\\r");
-
-                        let js_code = format!(
-                            r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
-                            escaped_html
-                        );
-
-                        // For webkit6, use evaluate_javascript instead of run_javascript
-                        // Parameters: javascript, length (None for null-terminated), source_uri, cancellable, callback
-                        webview.evaluate_javascript(&js_code, None, None, None::<&adw::gio::Cancellable>, |result| {
-                            if let Err(e) = result {
-                                eprintln!("Error running JS: {}", e);
+                    if let Some(channel_id_str) = channel_id_for_closure {
+                        idle_add_local(move || {
+                            let emote_map = get_emote_map(&channel_id_str);
+                            let mut html_content = String::new();
+                            for msg in &messages_to_process {
+                                 html_content.push_str(&parse_message_html(msg, &emote_map));
+                                 html_content.push('\n');
                             }
-                        });
 
-                        ControlFlow::Break
-                    });
-                } // End if let Some(channel_id_str)
+                            let escaped_html = html_content
+                                .replace('\\', "\\\\")
+                                .replace('\'', "\\'")
+                                .replace('\n', "\\n")
+                                .replace('\r', "\\r");
+
+                            let js_code = format!(
+                                r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
+                                escaped_html
+                            );
+
+                            webview.evaluate_javascript(&js_code, None, None, None::<&adw::gio::Cancellable>, |result| {
+                                if let Err(e) = result {
+                                    eprintln!("Error running JS: {}", e);
+                                }
+                            });
+
+                            ControlFlow::Break
+                        });
+                    }
+                }
+                break; // Only process one tab
+            }
+        } else {
+            // If no tab is selected, drain messages from all tabs to prevent queue buildup
+            for (_, tab_data) in tabs_map.iter() {
+                let rx = tab_data.rx.lock().unwrap();
+                let mut drained = 0;
+                while rx.try_recv().is_ok() {
+                    drained += 1;
+                    if drained > 100 { break; } // Prevent infinite loop
+                }
+                if drained > 0 {
+                    println!("Drained {} messages from inactive tab", drained);
+                }
             }
         }
+
         glib::ControlFlow::Continue
     });
 
@@ -790,14 +805,14 @@ fn create_new_tab(
       let isUserScrolling = false;
       let scrollTimeout = null;
       const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 100;
+      const MAX_MESSAGES = 50; // Reduced from 100
+      let messageCount = 0;
+      let isProcessing = false;
 
-      // Detect if user is manually scrolling
       chatContainer.addEventListener('scroll', function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
         isUserScrolling = !isAtBottom;
 
-        // Reset after 2 seconds of no scrolling
         clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {
           isUserScrolling = false;
@@ -805,27 +820,46 @@ fn create_new_tab(
       });
 
       function appendMessages(htmlString) {
-        var chatBody = document.getElementById('chat-body');
-        var tempDiv = document.createElement('div');
-        tempDiv.innerHTML = htmlString;
-
-        while (tempDiv.firstChild) {
-          chatBody.appendChild(tempDiv.firstChild);
+        // Throttle if already processing
+        if (isProcessing) {
+          console.log("Skipping message batch - already processing");
+          return;
         }
 
-        // Remove old messages if we exceed the limit
-        var messages = chatBody.getElementsByClassName('message-box');
-        while (messages.length > MAX_MESSAGES) {
-          chatBody.removeChild(messages[0]);
-        }
+        isProcessing = true;
 
-        // Only auto-scroll if user isn't manually scrolling
-        if (!isUserScrolling) {
-          chatContainer.scrollTop = chatContainer.scrollHeight;
+        try {
+          var chatBody = document.getElementById('chat-body');
+          var tempDiv = document.createElement('div');
+          tempDiv.innerHTML = htmlString;
+
+          // Use DocumentFragment for better performance
+          var fragment = document.createDocumentFragment();
+          while (tempDiv.firstChild) {
+            fragment.appendChild(tempDiv.firstChild);
+            messageCount++;
+          }
+          chatBody.appendChild(fragment);
+
+          // Aggressive cleanup - remove old messages
+          if (messageCount > MAX_MESSAGES) {
+            var messages = chatBody.getElementsByClassName('message-box');
+            var toRemove = messageCount - MAX_MESSAGES;
+            for (var i = 0; i < toRemove && messages.length > 0; i++) {
+              chatBody.removeChild(messages[0]);
+              messageCount--;
+            }
+          }
+
+          // Only auto-scroll if user isn't manually scrolling
+          if (!isUserScrolling) {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+          }
+        } finally {
+          isProcessing = false;
         }
       }
 
-      // Initial scroll to bottom
       window.onload = function() {
         chatContainer.scrollTop = chatContainer.scrollHeight;
       };
