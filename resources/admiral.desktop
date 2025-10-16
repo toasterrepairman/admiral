@@ -15,7 +15,7 @@ Icon=icon-admiral
 
 ## Is it a terminal app? For example htop will be set as Terminal=True ##
 ## Then default terminal app will be used to open the 'htop' ##
-Terminal=true
+Terminal=false
 
 ##  The type as listed  ##
 Type=Application
