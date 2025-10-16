@@ -25,6 +25,7 @@ use std::path::Path; // For path handling
 use std::io::{Read, Write}; // For reading/writing files
 use toml; // For TOML serialization
 use rlimit::{Resource};
+use std::time::Instant;
 
 mod auth; // Assuming these modules exist
 mod emotes; // Assuming these modules exist
@@ -79,11 +80,14 @@ struct TabData {
     channel_name: Arc<Mutex<Option<String>>>,
     client_state: Arc<Mutex<ClientState>>,
     connection_state: Arc<Mutex<ConnectionState>>,
-    tx: std::sync::mpsc::SyncSender<twitch_irc::message::PrivmsgMessage>, // Changed to SyncSender
+    tx: std::sync::mpsc::SyncSender<twitch_irc::message::PrivmsgMessage>,
     rx: Arc<Mutex<std::sync::mpsc::Receiver<twitch_irc::message::PrivmsgMessage>>>,
     error_tx: std::sync::mpsc::Sender<()>,
     error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    js_executing: Arc<Mutex<bool>>,           // Track if JS is currently executing
+    last_js_execution: Arc<Mutex<Instant>>,   // Track last successful JS execution
 }
+
 
 // In your main function, replace the rlimit code with:
 fn main() {
@@ -560,63 +564,103 @@ fn build_ui(app: &Application) {
     let tabs_clone = tabs.clone();
     let tab_view_for_processing = tab_view.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        let tabs_map = tabs_clone.lock().unwrap();
+    let tabs_map = tabs_clone.lock().unwrap();
 
-        // Only process the currently selected tab
-        if let Some(selected_page) = tab_view_for_processing.selected_page() {
-            for (_, tab_data) in tabs_map.iter() {
-                if tab_data.page != selected_page {
-                    continue; // Skip inactive tabs
+    // Only process the currently selected tab
+    if let Some(selected_page) = tab_view_for_processing.selected_page() {
+        for (_, tab_data) in tabs_map.iter() {
+            if tab_data.page != selected_page {
+                continue; // Skip inactive tabs
+            }
+
+            // NEW: Check if JavaScript is already executing
+            let is_executing = *tab_data.js_executing.lock().unwrap();
+            if is_executing {
+                // Skip this iteration if JS is still executing
+                break;
+            }
+
+            // NEW: Check if we're being throttled (prevent overwhelming WebView)
+            let last_execution = *tab_data.last_js_execution.lock().unwrap();
+            if last_execution.elapsed() < std::time::Duration::from_millis(50) {
+                // Too soon since last execution, skip
+                break;
+            }
+
+            let mut messages_to_process = Vec::new();
+            let rx = tab_data.rx.lock().unwrap();
+            const MAX_BATCH_SIZE: usize = 10; // Reduced from 20
+
+            loop {
+                if messages_to_process.len() >= MAX_BATCH_SIZE {
+                    break;
                 }
-
-                let mut messages_to_process = Vec::new();
-                let rx = tab_data.rx.lock().unwrap();
-                const MAX_BATCH_SIZE: usize = 20; // Reduce batch size
-
-                loop {
-                    if messages_to_process.len() >= MAX_BATCH_SIZE {
-                        break;
-                    }
-                    match rx.try_recv() {
-                        Ok(msg) => messages_to_process.push(msg),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => break,
-                    }
+                match rx.try_recv() {
+                    Ok(msg) => messages_to_process.push(msg),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break,
                 }
-                drop(rx);
+            }
+            drop(rx);
 
-                if !messages_to_process.is_empty() {
-                    let webview = tab_data.webview.clone();
-                    let channel_id_for_closure = messages_to_process
-                        .first()
-                        .map(|msg| msg.channel_id.clone());
+            if !messages_to_process.is_empty() {
+                let webview = tab_data.webview.clone();
+                let channel_id_for_closure = messages_to_process
+                    .first()
+                    .map(|msg| msg.channel_id.clone());
 
-                    if let Some(channel_id_str) = channel_id_for_closure {
-                        idle_add_local(move || {
-                            let emote_map = get_emote_map(&channel_id_str);
-                            let mut html_content = String::new();
-                            for msg in &messages_to_process {
-                                 html_content.push_str(&parse_message_html(msg, &emote_map));
-                                 html_content.push('\n');
-                            }
+                // NEW: Clone the Arc<Mutex> fields for the closure
+                let js_executing = tab_data.js_executing.clone();
+                let last_js_execution = tab_data.last_js_execution.clone();
 
-                            let escaped_html = html_content
-                                .replace('\\', "\\\\")
-                                .replace('\'', "\\'")
-                                .replace('\n', "\\n")
-                                .replace('\r', "\\r");
+                if let Some(channel_id_str) = channel_id_for_closure {
+                    // NEW: Mark JS as executing BEFORE we queue the operation
+                    *js_executing.lock().unwrap() = true;
 
-                            let js_code = format!(
-                                r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
-                                escaped_html
-                            );
+                    idle_add_local(move || {
+                        let emote_map = get_emote_map(&channel_id_str);
+                        let mut html_content = String::new();
+                        for msg in &messages_to_process {
+                            html_content.push_str(&parse_message_html(msg, &emote_map));
+                            html_content.push('\n');
+                        }
 
-                            webview.evaluate_javascript(&js_code, None, None, None::<&adw::gio::Cancellable>, |result| {
-                                if let Err(e) = result {
-                                    eprintln!("Error running JS: {}", e);
+                        let escaped_html = html_content
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n")
+                            .replace('\r', "\\r");
+
+                        let js_code = format!(
+                            r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
+                            escaped_html
+                        );
+
+                        // NEW: Clone for the callback
+                        let js_executing_cb = js_executing.clone();
+                        let last_js_execution_cb = last_js_execution.clone();
+
+                        webview.evaluate_javascript(
+                            &js_code,
+                            None,
+                            None,
+                            None::<&adw::gio::Cancellable>,
+                            move |result| {
+                                // NEW: Always mark as done, even on error
+                                *js_executing_cb.lock().unwrap() = false;
+
+                                match result {
+                                    Ok(_) => {
+                                        // Update last successful execution time
+                                        *last_js_execution_cb.lock().unwrap() = Instant::now();
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error running JS (WebView may be busy): {}", e);
+                                        // Don't update last_execution on error - will retry sooner
+                                    }
                                 }
-                            });
-
+                            },
+                        );
                             ControlFlow::Break
                         });
                     }
@@ -917,7 +961,7 @@ fn create_new_tab(
     let tab_id = format!("tab_{}_{}", timestamp, tab_count);
     let tab_data = TabData {
         page: page.clone(),
-        webview: webview.clone(), // Store WebView
+        webview: webview.clone(),
         stack: stack.clone(),
         entry: entry.clone(),
         channel_name: Arc::new(Mutex::new(None)),
@@ -927,6 +971,8 @@ fn create_new_tab(
         rx: Arc::new(Mutex::new(rx)),
         error_tx,
         error_rx: Arc::new(Mutex::new(error_rx)),
+        js_executing: Arc::new(Mutex::new(false)),
+        last_js_execution: Arc::new(Mutex::new(Instant::now())),
     };
     let tab_data_arc = Arc::new(tab_data);
     tabs.lock().unwrap().insert(tab_id.clone(), tab_data_arc.clone());
