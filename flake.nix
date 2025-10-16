@@ -86,8 +86,17 @@
             pkgs.gst_all_1.gst-plugins-ugly
             pkgs.gst_all_1.gst-libav
             ]}"
+            --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeSearchPath "lib" [
+              pkgs.gst_all_1.gstreamer
+              pkgs.gst_all_1.gst-plugins-base
+              pkgs.gst_all_1.gst-plugins-good
+              pkgs.gst_all_1.gst-plugins-bad
+              pkgs.gst_all_1.gst-plugins-ugly
+              pkgs.gst_all_1.gst-libav
+            ]}"
         '';
       };
+
     in {
       defaultPackage = myRustBuild;
       devShell = pkgs.mkShell {
