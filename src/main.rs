@@ -581,15 +581,18 @@ fn build_ui(app: &Application) {
             }
 
             // NEW: Check if we're being throttled (prevent overwhelming WebView)
+            // Increase the minimum time between JS executions
             let last_execution = *tab_data.last_js_execution.lock().unwrap();
-            if last_execution.elapsed() < std::time::Duration::from_millis(50) {
-                // Too soon since last execution, skip
+            if last_execution.elapsed() < std::time::Duration::from_millis(150) {
+                // Increase from 50ms to 150ms
                 break;
             }
 
+            // Only process a maximum of 3 messages at a time
+
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
-            const MAX_BATCH_SIZE: usize = 5; // Reduced from 20
+            const MAX_BATCH_SIZE: usize = 3; // Reduced from 20
 
             loop {
                 if messages_to_process.len() >= MAX_BATCH_SIZE {
@@ -784,6 +787,16 @@ fn create_new_tab(
     // Set WebView to use transparent background and match GTK theme
     webview.set_background_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
 
+    // Configure WebView for better stability
+    let settings = webkit6::Settings::new();
+    settings.set_property("enable-write-console-messages-to-stdout", true);
+    settings.set_property("javascript-can-open-windows-automatically", false);
+    settings.set_property("enable-page-cache", false);
+    settings.set_property("enable-webgl", false);
+    settings.set_property("enable-smooth-scrolling", false);
+    settings.set_property("enable-media-stream", false);
+    settings.set_property("enable-dns-prefetching", false);
+
     // Inject initial HTML and JavaScript with theme-aware styling
     let initial_html = r#"
     <!DOCTYPE html>
@@ -864,13 +877,12 @@ fn create_new_tab(
       });
 
       function appendMessages(htmlString) {
-        // Throttle if already processing
-        if (isProcessing) {
-          console.log("Skipping message batch - already processing");
-          return;
+        const now = Date.now();
+        if (now - lastExecutionTime < MIN_EXECUTION_INTERVAL) {
+            console.log("Skipping message batch - too frequent execution");
+            return;
         }
-
-        isProcessing = true;
+        lastExecutionTime = now;
 
         try {
           var chatBody = document.getElementById('chat-body');

@@ -53,7 +53,8 @@
         gst_all_1.gst-plugins-good
         gst_all_1.gst-plugins-bad
         gst_all_1.gst-plugins-ugly
-
+        mesa
+        libva
         # Optional: Add GST debugging tools
       ];
 
@@ -80,12 +81,12 @@
         postInstall = ''
           wrapProgram $out/bin/admiral \
             --set GST_PLUGIN_SYSTEM_PATH_1_0 "${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
-            pkgs.gst_all_1.gst-plugins-base
-            pkgs.gst_all_1.gst-plugins-good
-            pkgs.gst_all_1.gst-plugins-bad
-            pkgs.gst_all_1.gst-plugins-ugly
-            pkgs.gst_all_1.gst-libav
-            ]}"
+              pkgs.gst_all_1.gst-plugins-base
+              pkgs.gst_all_1.gst-plugins-good
+              pkgs.gst_all_1.gst-plugins-bad
+              pkgs.gst_all_1.gst-plugins-ugly
+              pkgs.gst_all_1.gst-libav
+            ]}" \
             --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeSearchPath "lib" [
               pkgs.gst_all_1.gstreamer
               pkgs.gst_all_1.gst-plugins-base
@@ -93,7 +94,20 @@
               pkgs.gst_all_1.gst-plugins-bad
               pkgs.gst_all_1.gst-plugins-ugly
               pkgs.gst_all_1.gst-libav
-            ]}"
+              pkgs.mesa
+              pkgs.libva
+            ]}" \
+            --set WEBKIT_HW_ACCELERATION_POLICY "always" \
+            --set LIBGL_ALWAYS_SOFTWARE "0" \
+            --set MESA_GL_VERSION_OVERRIDE "4.6" \
+            --set MESA_GLSL_VERSION_OVERRIDE "460" \
+            --set GALLIUM_DRIVER "kmsro"
+            --set WEBKIT_DISABLE_COMPOSITING_MODE "1" \
+            --set WEBKIT_DISABLE_SOFTWARE_RASTERIZER "0" \
+            --set WEBKIT_DISABLE_ACCELERATED_2D_CANVAS "1" \
+            --set WEBKIT_DISABLE_VIDEO "1" \
+            --set WEBKIT_ENABLE_VIDEO "0" \
+            --set WEBKIT_DISABLE_TOUCH_EVENTS "1" \
         '';
       };
 
