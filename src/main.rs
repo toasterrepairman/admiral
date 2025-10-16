@@ -589,7 +589,7 @@ fn build_ui(app: &Application) {
 
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
-            const MAX_BATCH_SIZE: usize = 10; // Reduced from 20
+            const MAX_BATCH_SIZE: usize = 5; // Reduced from 20
 
             loop {
                 if messages_to_process.len() >= MAX_BATCH_SIZE {
