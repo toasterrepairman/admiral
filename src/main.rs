@@ -896,23 +896,25 @@ fn create_new_tab(
         var fragment = document.createDocumentFragment();
         while (tempDiv.firstChild) {
           fragment.appendChild(tempDiv.firstChild);
-          messageCount++;
         }
 
-        // Remove old messages BEFORE adding new ones to prevent DOM bloat
-        if (messageCount > MAX_MESSAGES) {
-          var messages = chatBody.getElementsByClassName('message-box');
-          var toRemove = messageCount - MAX_MESSAGES;
-          // Remove in larger batches for efficiency
-          var removed = 0;
-          while (removed < toRemove && messages.length > 0) {
-            chatBody.removeChild(messages[0]);
-            messageCount--;
-            removed++;
-          }
-        }
-
+        // Append new messages first
         chatBody.appendChild(fragment);
+
+        // Update message count and remove old messages AFTER adding
+        var messages = chatBody.getElementsByClassName('message-box');
+        messageCount = messages.length;
+
+        if (messageCount > MAX_MESSAGES) {
+          var toRemove = messageCount - MAX_MESSAGES;
+          // Remove old messages from the beginning
+          for (var i = 0; i < toRemove; i++) {
+            if (messages.length > 0) {
+              chatBody.removeChild(messages[0]);
+            }
+          }
+          messageCount = chatBody.getElementsByClassName('message-box').length;
+        }
 
         // Only auto-scroll if user isn't manually scrolling
         if (!isUserScrolling) {
@@ -1120,18 +1122,24 @@ fn start_connection_for_tab(
         var fragment = document.createDocumentFragment();
         while (tempDiv.firstChild) {
           fragment.appendChild(tempDiv.firstChild);
-          messageCount++;
         }
+
+        // Append new messages first
         chatBody.appendChild(fragment);
 
-        // Remove old messages if we exceed the limit
+        // Update message count and remove old messages AFTER adding
+        var messages = chatBody.getElementsByClassName('message-box');
+        messageCount = messages.length;
+
         if (messageCount > MAX_MESSAGES) {
-          var messages = chatBody.getElementsByClassName('message-box');
           var toRemove = messageCount - MAX_MESSAGES;
-          for (var i = 0; i < toRemove && messages.length > 0; i++) {
-            chatBody.removeChild(messages[0]);
-            messageCount--;
+          // Remove old messages from the beginning
+          for (var i = 0; i < toRemove; i++) {
+            if (messages.length > 0) {
+              chatBody.removeChild(messages[0]);
+            }
           }
+          messageCount = chatBody.getElementsByClassName('message-box').length;
         }
 
         // Only auto-scroll if user isn't manually scrolling
