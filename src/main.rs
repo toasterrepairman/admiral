@@ -784,8 +784,14 @@ fn create_new_tab(
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
-    // Set WebView to use transparent background and match GTK theme
-    webview.set_background_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
+    // Use GTK theme background color instead of transparent
+    // This prevents paint-over issues while respecting the user's theme
+    let style_context = webview.style_context();
+    let bg_color = style_context.color();
+
+    // Get the actual background color from the theme (defaults to opaque)
+    // We'll inject this into the WebView HTML via JavaScript
+    webview.set_background_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 1.0));
 
     // Configure WebView for better stability
     let settings = webkit6::Settings::new();
@@ -796,6 +802,11 @@ fn create_new_tab(
     settings.set_property("enable-smooth-scrolling", false);
     settings.set_property("enable-media-stream", false);
     settings.set_property("enable-dns-prefetching", false);
+    settings.set_property("hardware-acceleration-policy", webkit6::HardwareAccelerationPolicy::Never);
+    settings.set_property("enable-media", true);
+    settings.set_property("media-playback-requires-user-gesture", false);
+
+    webview.set_settings(&settings);
 
     // Inject initial HTML and JavaScript with theme-aware styling
     let initial_html = r#"

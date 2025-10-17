@@ -53,9 +53,27 @@
         gst_all_1.gst-plugins-good
         gst_all_1.gst-plugins-bad
         gst_all_1.gst-plugins-ugly
+        gst_all_1.gst-libav
+        # Hardware acceleration and WebKit dependencies
         mesa
+        mesa.drivers
         libva
+        libva-utils
+        vaapiVdpau
+        libvdpau-va-gl
+        intel-media-driver  # For Intel GPUs
         # Optional: Add GST debugging tools
+        libGL
+        libglvnd
+        xorg.libX11
+        xorg.libXcomposite
+        xorg.libXdamage
+        xorg.libXext
+        xorg.libXfixes
+        xorg.libXrender
+        dbus
+        bubblewrap
+        xdg-dbus-proxy
       ];
 
       rustPlatform = pkgs.makeRustPlatform {
@@ -95,20 +113,24 @@
               pkgs.gst_all_1.gst-plugins-ugly
               pkgs.gst_all_1.gst-libav
               pkgs.mesa
+              pkgs.mesa.drivers
               pkgs.libva
+              pkgs.libglvnd
+              pkgs.libGL
             ]}" \
-            --set WEBKIT_HW_ACCELERATION_POLICY "always" \
-            --set LIBGL_ALWAYS_SOFTWARE "0" \
-            --set MESA_GL_VERSION_OVERRIDE "4.6" \
-            --set MESA_GLSL_VERSION_OVERRIDE "460" \
-            --set GALLIUM_DRIVER "kmsro"
-            --set WEBKIT_DISABLE_COMPOSITING_MODE "1" \
-            --set WEBKIT_DISABLE_SOFTWARE_RASTERIZER "0" \
-            --set WEBKIT_DISABLE_ACCELERATED_2D_CANVAS "1" \
-            --set WEBKIT_DISABLE_VIDEO "1" \
-            --set WEBKIT_ENABLE_VIDEO "0" \
-            --set WEBKIT_DISABLE_TOUCH_EVENTS "1" \
-        '';
+            --prefix XDG_DATA_DIRS : "${pkgs.lib.makeSearchPath "share" [
+              pkgs.gtk3
+              pkgs.libadwaita
+              pkgs.webkitgtk_6_0
+            ]}" \
+            --set WEBKIT_DISABLE_COMPOSITING_MODE "0" \
+            --set WEBKIT_FORCE_SANDBOX "0" \
+            --set GDK_GL "gles" \
+            --set LIBVA_DRIVER_NAME "iHD" \
+            --prefix PATH : "${pkgs.lib.makeBinPath [
+              pkgs.bubblewrap
+              pkgs.xdg-dbus-proxy
+            ]}"'';
       };
 
     in {
