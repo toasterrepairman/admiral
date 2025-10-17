@@ -84,8 +84,7 @@ struct TabData {
     rx: Arc<Mutex<std::sync::mpsc::Receiver<twitch_irc::message::PrivmsgMessage>>>,
     error_tx: std::sync::mpsc::Sender<()>,
     error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
-    js_executing: Arc<Mutex<bool>>,           // Track if JS is currently executing
-    last_js_execution: Arc<Mutex<Instant>>,   // Track last successful JS execution
+    last_js_execution: Arc<Mutex<Instant>>,
 }
 
 
@@ -573,26 +572,15 @@ fn build_ui(app: &Application) {
                 continue; // Skip inactive tabs
             }
 
-            // NEW: Check if JavaScript is already executing
-            let is_executing = *tab_data.js_executing.lock().unwrap();
-            if is_executing {
-                // Skip this iteration if JS is still executing
-                break;
-            }
-
-            // NEW: Check if we're being throttled (prevent overwhelming WebView)
-            // Increase the minimum time between JS executions
+            // Throttle JS execution to prevent overwhelming WebView
             let last_execution = *tab_data.last_js_execution.lock().unwrap();
-            if last_execution.elapsed() < std::time::Duration::from_millis(150) {
-                // Increase from 50ms to 150ms
+            if last_execution.elapsed() < std::time::Duration::from_millis(50) {
                 break;
             }
-
-            // Only process a maximum of 3 messages at a time
 
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
-            const MAX_BATCH_SIZE: usize = 3; // Reduced from 20
+            const MAX_BATCH_SIZE: usize = 20;
 
             loop {
                 if messages_to_process.len() >= MAX_BATCH_SIZE {
@@ -612,65 +600,49 @@ fn build_ui(app: &Application) {
                     .first()
                     .map(|msg| msg.channel_id.clone());
 
-                // NEW: Clone the Arc<Mutex> fields for the closure
-                let js_executing = tab_data.js_executing.clone();
                 let last_js_execution = tab_data.last_js_execution.clone();
 
                 if let Some(channel_id_str) = channel_id_for_closure {
-                    // NEW: Mark JS as executing BEFORE we queue the operation
-                    *js_executing.lock().unwrap() = true;
-
-                    idle_add_local(move || {
-                        let emote_map = get_emote_map(&channel_id_str);
-                        let mut html_content = String::new();
-                        for msg in &messages_to_process {
-                            html_content.push_str(&parse_message_html(msg, &emote_map));
-                            html_content.push('\n');
-                        }
-
-                        let escaped_html = html_content
-                            .replace('\\', "\\\\")
-                            .replace('\'', "\\'")
-                            .replace('\n', "\\n")
-                            .replace('\r', "\\r");
-
-                        let js_code = format!(
-                            r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
-                            escaped_html
-                        );
-
-                        // NEW: Clone for the callback
-                        let js_executing_cb = js_executing.clone();
-                        let last_js_execution_cb = last_js_execution.clone();
-
-                        webview.evaluate_javascript(
-                            &js_code,
-                            None,
-                            None,
-                            None::<&adw::gio::Cancellable>,
-                            move |result| {
-                                // NEW: Always mark as done, even on error
-                                *js_executing_cb.lock().unwrap() = false;
-
-                                match result {
-                                    Ok(_) => {
-                                        // Update last successful execution time
-                                        *last_js_execution_cb.lock().unwrap() = Instant::now();
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Error running JS (WebView may be busy): {}", e);
-                                        // Don't update last_execution on error - will retry sooner
-                                    }
-                                }
-                            },
-                        );
-                            ControlFlow::Break
-                        });
+                    let emote_map = get_emote_map(&channel_id_str);
+                    let mut html_content = String::new();
+                    for msg in &messages_to_process {
+                        html_content.push_str(&parse_message_html(msg, &emote_map));
+                        html_content.push('\n');
                     }
+
+                    let escaped_html = html_content
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "\\n")
+                        .replace('\r', "\\r");
+
+                    let js_code = format!(
+                        r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
+                        escaped_html
+                    );
+
+                    webview.evaluate_javascript(
+                        &js_code,
+                        None,
+                        None,
+                        None::<&adw::gio::Cancellable>,
+                        move |result| {
+                            match result {
+                                Ok(_) => {
+                                    *last_js_execution.lock().unwrap() = Instant::now();
+                                }
+                                Err(e) => {
+                                    eprintln!("Error running JS: {}", e);
+                                }
+                            }
+                        },
+                    );
                 }
                 break; // Only process one tab
             }
-        } else {
+            break; // Only process one tab
+        }
+    } else {
             // If no tab is selected, drain messages from all tabs to prevent queue buildup
             for (_, tab_data) in tabs_map.iter() {
                 let rx = tab_data.rx.lock().unwrap();
@@ -878,9 +850,8 @@ fn create_new_tab(
       let isUserScrolling = false;
       let scrollTimeout = null;
       const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 50; // Reduced from 100
+      const MAX_MESSAGES = 150;
       let messageCount = 0;
-      let isProcessing = false;
 
       chatContainer.addEventListener('scroll', function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
@@ -893,42 +864,31 @@ fn create_new_tab(
       });
 
       function appendMessages(htmlString) {
-        const now = Date.now();
-        if (now - lastExecutionTime < MIN_EXECUTION_INTERVAL) {
-            console.log("Skipping message batch - too frequent execution");
-            return;
+        var chatBody = document.getElementById('chat-body');
+        var tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlString;
+
+        // Use DocumentFragment for better performance
+        var fragment = document.createDocumentFragment();
+        while (tempDiv.firstChild) {
+          fragment.appendChild(tempDiv.firstChild);
+          messageCount++;
         }
-        lastExecutionTime = now;
+        chatBody.appendChild(fragment);
 
-        try {
-          var chatBody = document.getElementById('chat-body');
-          var tempDiv = document.createElement('div');
-          tempDiv.innerHTML = htmlString;
-
-          // Use DocumentFragment for better performance
-          var fragment = document.createDocumentFragment();
-          while (tempDiv.firstChild) {
-            fragment.appendChild(tempDiv.firstChild);
-            messageCount++;
+        // Remove old messages if we exceed the limit
+        if (messageCount > MAX_MESSAGES) {
+          var messages = chatBody.getElementsByClassName('message-box');
+          var toRemove = messageCount - MAX_MESSAGES;
+          for (var i = 0; i < toRemove && messages.length > 0; i++) {
+            chatBody.removeChild(messages[0]);
+            messageCount--;
           }
-          chatBody.appendChild(fragment);
+        }
 
-          // Aggressive cleanup - remove old messages
-          if (messageCount > MAX_MESSAGES) {
-            var messages = chatBody.getElementsByClassName('message-box');
-            var toRemove = messageCount - MAX_MESSAGES;
-            for (var i = 0; i < toRemove && messages.length > 0; i++) {
-              chatBody.removeChild(messages[0]);
-              messageCount--;
-            }
-          }
-
-          // Only auto-scroll if user isn't manually scrolling
-          if (!isUserScrolling) {
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-          }
-        } finally {
-          isProcessing = false;
+        // Only auto-scroll if user isn't manually scrolling
+        if (!isUserScrolling) {
+          chatContainer.scrollTop = chatContainer.scrollHeight;
         }
       }
 
@@ -999,7 +959,6 @@ fn create_new_tab(
         rx: Arc::new(Mutex::new(rx)),
         error_tx,
         error_rx: Arc::new(Mutex::new(error_rx)),
-        js_executing: Arc::new(Mutex::new(false)),
         last_js_execution: Arc::new(Mutex::new(Instant::now())),
     };
     let tab_data_arc = Arc::new(tab_data);
@@ -1111,14 +1070,13 @@ fn start_connection_for_tab(
       let isUserScrolling = false;
       let scrollTimeout = null;
       const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 100;
+      const MAX_MESSAGES = 150;
+      let messageCount = 0;
 
-      // Detect if user is manually scrolling
       chatContainer.addEventListener('scroll', function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
         isUserScrolling = !isAtBottom;
 
-        // Reset after 2 seconds of no scrolling
         clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {
           isUserScrolling = false;
@@ -1130,14 +1088,22 @@ fn start_connection_for_tab(
         var tempDiv = document.createElement('div');
         tempDiv.innerHTML = htmlString;
 
+        // Use DocumentFragment for better performance
+        var fragment = document.createDocumentFragment();
         while (tempDiv.firstChild) {
-          chatBody.appendChild(tempDiv.firstChild);
+          fragment.appendChild(tempDiv.firstChild);
+          messageCount++;
         }
+        chatBody.appendChild(fragment);
 
         // Remove old messages if we exceed the limit
-        var messages = chatBody.getElementsByClassName('message-box');
-        while (messages.length > MAX_MESSAGES) {
-          chatBody.removeChild(messages[0]);
+        if (messageCount > MAX_MESSAGES) {
+          var messages = chatBody.getElementsByClassName('message-box');
+          var toRemove = messageCount - MAX_MESSAGES;
+          for (var i = 0; i < toRemove && messages.length > 0; i++) {
+            chatBody.removeChild(messages[0]);
+            messageCount--;
+          }
         }
 
         // Only auto-scroll if user isn't manually scrolling
