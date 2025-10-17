@@ -719,6 +719,7 @@ fn build_ui(app: &Application) {
 
     let quit_action = SimpleAction::new("quit", None);
     let tabs_quit = tabs.clone();
+    let window_quit = window.clone();
     quit_action.connect_activate(move |_, _| {
         println!("Quit action triggered");
         let tabs_map = tabs_quit.lock().unwrap();
@@ -729,6 +730,9 @@ fn build_ui(app: &Application) {
         drop(tabs_map);
         tabs_quit.lock().unwrap().clear();
         println!("All tabs disconnected and cleared");
+
+        // Close the window after all tabs are disconnected
+        window_quit.close();
     });
     window.add_action(&quit_action);
     app.set_accels_for_action("win.quit", &["<Control>q"]);
