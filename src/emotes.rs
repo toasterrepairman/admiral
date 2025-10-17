@@ -17,14 +17,30 @@ pub static MESSAGE_CSS: &str = "
     border: 1px solid alpha(#999, 0.3);
     border-radius: 8px;
     padding: 8px;
+    margin-bottom: 4px;
     background-color: alpha(#fff, 0.02);
+    display: block;
+    overflow: hidden;
+    box-sizing: border-box;
 }
 .message-row {
     background-color: transparent;
 }
+.message-header {
+    display: block;
+    margin-bottom: 4px;
+}
 .message-text {
     font-size: 12pt;
     line-height: 28px; /* Consistent line height matching emote size */
+    display: inline;
+}
+.message-text img {
+    display: inline-block;
+    vertical-align: middle;
+    height: 28px;
+    width: auto;
+    margin: 0 2px;
 }
 .dim-label {
     color: alpha(#aaa, 0.8);
@@ -32,6 +48,16 @@ pub static MESSAGE_CSS: &str = "
 }
 .message-content {
     padding-top: 4px;
+    display: block;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+.sender {
+    font-weight: bold;
+}
+.timestamp {
+    color: alpha(#aaa, 0.8);
+    font-size: 0.8em;
 }
 .emote-popover-label {
     font-family: monospace;
@@ -326,13 +352,14 @@ pub fn parse_message_html(msg: &PrivmsgMessage, emote_map: &HashMap<String, Stri
         if let Some(remote_url) = emote_map.get(word) {
             // It's an emote, add the <img> tag with the remote URL
             let emote_name_escaped = glib::markup_escape_text(word);
+            let remote_url_escaped = glib::markup_escape_text(remote_url);
             html_content.push_str(r#"<img src=""#);
-            html_content.push_str(remote_url);
+            html_content.push_str(&remote_url_escaped);
             html_content.push_str(r#"" alt=":"#);
             html_content.push_str(&emote_name_escaped);
             html_content.push_str(r#":" title=":"#);
             html_content.push_str(&emote_name_escaped);
-            html_content.push_str(r#":>"#);
+            html_content.push_str(r#":"/>"#);
         } else {
             // Not an emote, just add the word as escaped text
             html_content.push_str(&glib::markup_escape_text(word));
@@ -340,7 +367,7 @@ pub fn parse_message_html(msg: &PrivmsgMessage, emote_map: &HashMap<String, Stri
     }
 
     format!(
-        r#"<div class="message-box"><div class="message-header">{}<span class="timestamp">{}</span></div><div class="message-content">{}</div></div>"#,
+        r#"<div class="message-box"><div class="message-header">{} <span class="timestamp">{}</span></div><div class="message-content"><span class="message-text">{}</span></div></div>"#,
         sender_color_html,
         timestamp_escaped,
         html_content

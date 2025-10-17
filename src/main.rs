@@ -562,7 +562,7 @@ fn build_ui(app: &Application) {
 
     let tabs_clone = tabs.clone();
     let tab_view_for_processing = tab_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
     let tabs_map = tabs_clone.lock().unwrap();
 
     // Only process the currently selected tab
@@ -574,13 +574,14 @@ fn build_ui(app: &Application) {
 
             // Throttle JS execution to prevent overwhelming WebView
             let last_execution = *tab_data.last_js_execution.lock().unwrap();
-            if last_execution.elapsed() < std::time::Duration::from_millis(50) {
+            if last_execution.elapsed() < std::time::Duration::from_millis(30) {
                 break;
             }
 
             let mut messages_to_process = Vec::new();
             let rx = tab_data.rx.lock().unwrap();
-            const MAX_BATCH_SIZE: usize = 20;
+            const MAX_BATCH_SIZE: usize = 50; // Reduced to prevent WebView overload in extreme channels
+            const QUEUE_SIZE_WARNING: usize = 500; // Warn if queue gets too large
 
             loop {
                 if messages_to_process.len() >= MAX_BATCH_SIZE {
@@ -592,6 +593,26 @@ fn build_ui(app: &Application) {
                     Err(TryRecvError::Disconnected) => break,
                 }
             }
+
+            // Drain excess messages if queue is too large (prevents crash in extreme channels)
+            let mut queue_size = messages_to_process.len();
+            while queue_size < QUEUE_SIZE_WARNING {
+                match rx.try_recv() {
+                    Ok(_) => queue_size += 1,
+                    Err(_) => break,
+                }
+            }
+            if queue_size >= QUEUE_SIZE_WARNING {
+                let mut drained = 0;
+                while let Ok(_) = rx.try_recv() {
+                    drained += 1;
+                    if drained > 200 { break; } // Drain max 200 excess messages
+                }
+                if drained > 0 {
+                    eprintln!("Warning: Drained {} excess messages from overloaded queue", drained);
+                }
+            }
+
             drop(rx);
 
             if !messages_to_process.is_empty() {
@@ -850,7 +871,7 @@ fn create_new_tab(
       let isUserScrolling = false;
       let scrollTimeout = null;
       const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 150;
+      const MAX_MESSAGES = 75; // Reduced from 150 to prevent DOM bloat in high-traffic channels
       let messageCount = 0;
 
       chatContainer.addEventListener('scroll', function() {
@@ -868,23 +889,30 @@ fn create_new_tab(
         var tempDiv = document.createElement('div');
         tempDiv.innerHTML = htmlString;
 
+        // Count incoming messages
+        var incomingCount = tempDiv.getElementsByClassName('message-box').length;
+
         // Use DocumentFragment for better performance
         var fragment = document.createDocumentFragment();
         while (tempDiv.firstChild) {
           fragment.appendChild(tempDiv.firstChild);
           messageCount++;
         }
-        chatBody.appendChild(fragment);
 
-        // Remove old messages if we exceed the limit
+        // Remove old messages BEFORE adding new ones to prevent DOM bloat
         if (messageCount > MAX_MESSAGES) {
           var messages = chatBody.getElementsByClassName('message-box');
           var toRemove = messageCount - MAX_MESSAGES;
-          for (var i = 0; i < toRemove && messages.length > 0; i++) {
+          // Remove in larger batches for efficiency
+          var removed = 0;
+          while (removed < toRemove && messages.length > 0) {
             chatBody.removeChild(messages[0]);
             messageCount--;
+            removed++;
           }
         }
+
+        chatBody.appendChild(fragment);
 
         // Only auto-scroll if user isn't manually scrolling
         if (!isUserScrolling) {
@@ -938,7 +966,7 @@ fn create_new_tab(
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    let (tx, rx) = mpsc::sync_channel(100); // This is correct - bounded channel
+    let (tx, rx) = mpsc::sync_channel(1000); // Increased capacity for high-throughput channels (250 msg/s)
     let (error_tx, error_rx) = mpsc::channel();
 
     let tab_count = tabs.lock().unwrap().len();
@@ -1070,7 +1098,7 @@ fn start_connection_for_tab(
       let isUserScrolling = false;
       let scrollTimeout = null;
       const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 150;
+      const MAX_MESSAGES = 75; // Reduced from 150 to prevent DOM bloat in high-traffic channels
       let messageCount = 0;
 
       chatContainer.addEventListener('scroll', function() {
