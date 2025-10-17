@@ -784,14 +784,15 @@ fn create_new_tab(
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
-    // Use GTK theme background color instead of transparent
-    // This prevents paint-over issues while respecting the user's theme
+    // Get GTK theme background color
     let style_context = webview.style_context();
-    let bg_color = style_context.color();
+    // Try to get background color, fallback to a dark color if not available
+    let bg_color = style_context.lookup_color("window_bg_color")
+        .or_else(|| style_context.lookup_color("theme_bg_color"))
+        .unwrap_or_else(|| gdk::RGBA::new(0.11, 0.11, 0.11, 1.0)); // Fallback to #1e1e1e
 
-    // Get the actual background color from the theme (defaults to opaque)
-    // We'll inject this into the WebView HTML via JavaScript
-    webview.set_background_color(&gdk::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    // Set webview background to match GTK theme
+    webview.set_background_color(&bg_color);
 
     // Configure WebView for better stability
     let settings = webkit6::Settings::new();
