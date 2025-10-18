@@ -188,7 +188,6 @@ fn load_and_display_favorites(
     tab_view: &TabView,
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
 ) {
-    // Implementation remains the same as before
     list.remove_all();
     let favorites = load_favorites();
     let mut starred_channels = Vec::new();
@@ -206,6 +205,7 @@ fn load_and_display_favorites(
         header_label.add_css_class("heading");
         header_row.set_child(Some(&header_label));
         header_row.set_selectable(false);
+        header_row.set_activatable(false);
         list.append(&header_row);
         for channel in &starred_channels {
             create_favorite_row(
@@ -221,8 +221,6 @@ fn load_and_display_favorites(
         let separator = gtk::Separator::new(Orientation::Horizontal);
         separator.set_margin_top(8);
         separator.set_margin_bottom(8);
-        separator.set_sensitive(false);
-        separator.set_opacity(0.4);
         list.append(&separator);
     }
     if !regular_channels.is_empty() {
@@ -232,6 +230,7 @@ fn load_and_display_favorites(
             header_label.add_css_class("heading");
             header_row.set_child(Some(&header_label));
             header_row.set_selectable(false);
+            header_row.set_activatable(false);
             list.append(&header_row);
         }
         for channel in &regular_channels {
@@ -247,10 +246,21 @@ fn load_and_display_favorites(
         }
     }
     if favorites.channels.is_empty() {
+        // Create a status page style empty state
         let empty_row = ListBoxRow::new();
+        empty_row.set_selectable(false);
+        empty_row.set_activatable(false);
+        let empty_box = Box::new(Orientation::Vertical, 12);
+        empty_box.set_margin_top(24);
+        empty_box.set_margin_bottom(24);
+        empty_box.set_halign(Align::Center);
         let empty_label = gtk::Label::new(Some("No favorites yet"));
-        empty_label.add_css_class("dim-label");
-        empty_row.set_child(Some(&empty_label));
+        empty_label.add_css_class("title-4");
+        let subtitle_label = gtk::Label::new(Some("Add channels to get started"));
+        subtitle_label.add_css_class("dim-label");
+        empty_box.append(&empty_label);
+        empty_box.append(&subtitle_label);
+        empty_row.set_child(Some(&empty_box));
         list.append(&empty_row);
     }
 }
@@ -264,40 +274,42 @@ fn create_favorite_row(
     favorites_entry: &Entry,
     favorites_list: &gtk::ListBox, // Use fully qualified name
 ) {
-    // Implementation remains the same as before
-    let row = ListBoxRow::new();
-    let content_box = Box::new(Orientation::Horizontal, 6);
-    content_box.set_hexpand(true);
-    let channel_label = gtk::Label::builder()
-        .label(channel)
-        .halign(Align::Start)
-        .valign(gtk::Align::Center)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
+    // Create ActionRow for a modern Libadwaita look
+    let action_row = adw::ActionRow::builder()
+        .title(channel)
+        .activatable(true)
         .build();
+
+    // Create suffix button box
+    let suffix_box = Box::new(Orientation::Horizontal, 6);
+
+    // Star button
     let star_icon = if is_starred { "starred-symbolic" } else { "non-starred-symbolic" };
     let star_tooltip = if is_starred { "Unstar channel" } else { "Star channel" };
     let star_button = Button::builder()
         .icon_name(star_icon)
         .tooltip_text(star_tooltip)
+        .valign(gtk::Align::Center)
         .build();
+    star_button.add_css_class("flat");
+
+    // Trash button
     let trash_button = Button::builder()
         .icon_name("user-trash-symbolic")
         .tooltip_text("Remove from favorites")
+        .valign(gtk::Align::Center)
         .build();
-    content_box.append(&channel_label);
-    let spacer = Box::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    content_box.append(&spacer);
-    content_box.append(&star_button);
-    content_box.append(&trash_button);
-    row.set_child(Some(&content_box));
-    row.set_selectable(true);
-    row.set_activatable(true);
+    trash_button.add_css_class("flat");
+
+    suffix_box.append(&star_button);
+    suffix_box.append(&trash_button);
+    action_row.add_suffix(&suffix_box);
+
+    // Handle row activation (clicking the row itself)
     let channel_clone = channel.to_string();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
-    let gesture = gtk::GestureClick::new();
-    gesture.connect_released(move |_, _, _, _| {
+    action_row.connect_activated(move |_| {
         println!("Row clicked for channel: {}", channel_clone);
         create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
         let tab_view_clone2 = tab_view_clone.clone();
@@ -322,7 +334,8 @@ fn create_favorite_row(
             }
         });
     });
-    row.add_controller(gesture);
+
+    // Handle star button click
     let channel_clone = channel.to_string();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
@@ -338,6 +351,8 @@ fn create_favorite_row(
             &tabs_clone,
         );
     });
+
+    // Handle trash button click
     let channel_clone = channel.to_string();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
@@ -353,8 +368,8 @@ fn create_favorite_row(
             &tabs_clone,
         );
     });
-    row.add_css_class("compact-row");
-    list.append(&row);
+
+    list.append(&action_row);
 }
 
 fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
@@ -420,11 +435,12 @@ fn build_ui(app: &Application) {
         .autohide(true)
         .build();
 
-    let popover_content = Box::new(Orientation::Vertical, 6);
-    popover_content.set_margin_top(6);
-    popover_content.set_margin_bottom(6);
-    popover_content.set_margin_start(6);
-    popover_content.set_margin_end(6);
+    let popover_content = Box::new(Orientation::Vertical, 12);
+    popover_content.set_margin_top(12);
+    popover_content.set_margin_bottom(12);
+    popover_content.set_margin_start(12);
+    popover_content.set_margin_end(12);
+    popover_content.set_width_request(300);
 
     let favorites_entry = Entry::builder()
         .placeholder_text("Add channel to favorites")
@@ -441,7 +457,9 @@ fn build_ui(app: &Application) {
 
     let favorites_list = gtk::ListBox::builder() // Use fully qualified name
         .vexpand(true)
+        .selection_mode(gtk::SelectionMode::None)
         .build();
+    favorites_list.add_css_class("boxed-list");
     let favorites_scrolled = ScrolledWindow::builder()
         .vexpand(true)
         .min_content_height(200)
