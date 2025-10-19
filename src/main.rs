@@ -200,13 +200,6 @@ fn load_and_display_favorites(
         }
     }
     if !starred_channels.is_empty() {
-        let header_row = ListBoxRow::new();
-        let header_label = gtk::Label::new(Some("Starred Channels"));
-        header_label.add_css_class("heading");
-        header_row.set_child(Some(&header_label));
-        header_row.set_selectable(false);
-        header_row.set_activatable(false);
-        list.append(&header_row);
         for channel in &starred_channels {
             create_favorite_row(
                 list,
@@ -218,21 +211,8 @@ fn load_and_display_favorites(
                 &favorites_list,
             );
         }
-        let separator = gtk::Separator::new(Orientation::Horizontal);
-        separator.set_margin_top(8);
-        separator.set_margin_bottom(8);
-        list.append(&separator);
     }
     if !regular_channels.is_empty() {
-        if !starred_channels.is_empty() {
-            let header_row = ListBoxRow::new();
-            let header_label = gtk::Label::new(Some("Favorites"));
-            header_label.add_css_class("heading");
-            header_row.set_child(Some(&header_label));
-            header_row.set_selectable(false);
-            header_row.set_activatable(false);
-            list.append(&header_row);
-        }
         for channel in &regular_channels {
             create_favorite_row(
                 list,
@@ -435,20 +415,24 @@ fn build_ui(app: &Application) {
         .autohide(true)
         .build();
 
-    let popover_content = Box::new(Orientation::Vertical, 12);
-    popover_content.set_margin_top(12);
-    popover_content.set_margin_bottom(12);
-    popover_content.set_margin_start(12);
-    popover_content.set_margin_end(12);
+    let popover_content = Box::new(Orientation::Vertical, 6);
+    popover_content.set_margin_top(6);
+    popover_content.set_margin_bottom(6);
+    popover_content.set_margin_start(6);
+    popover_content.set_margin_end(6);
     popover_content.set_width_request(300);
 
     let favorites_entry = Entry::builder()
         .placeholder_text("Add channel to favorites")
         .build();
 
+    // Use icon-only button with primary style (GNOME-like)
     let add_favorite_button = GtkButton::builder()
-        .label("Add")
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add to favorites")
         .build();
+    add_favorite_button.add_css_class("circular");
+    add_favorite_button.add_css_class("suggested-action");
 
     let favorites_entry_box = Box::new(Orientation::Horizontal, 6);
     favorites_entry_box.append(&favorites_entry);
@@ -464,7 +448,9 @@ fn build_ui(app: &Application) {
         .vexpand(true)
         .min_content_height(200)
         .child(&favorites_list)
+        .propagate_natural_height(true)
         .build();
+    favorites_scrolled.set_margin_top(6);
     popover_content.append(&favorites_scrolled);
 
     popover.set_child(Some(&popover_content));
