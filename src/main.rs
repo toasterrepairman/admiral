@@ -891,6 +891,7 @@ fn create_new_tab(
       const chatContainer = document.getElementById('chat-container');
       const MAX_MESSAGES = 75; // Reduced from 150 to prevent DOM bloat in high-traffic channels
       let messageCount = 0;
+      let messageQueue = []; // Queue to hold messages when user is scrolling
 
       chatContainer.addEventListener('scroll', function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
@@ -899,16 +900,60 @@ fn create_new_tab(
         clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {
           isUserScrolling = false;
+          // Flush queued messages after 2 second delay
+          flushMessageQueue();
         }, 2000);
       });
 
+      function flushMessageQueue() {
+        if (messageQueue.length > 0) {
+          var chatBody = document.getElementById('chat-body');
+
+          // Process all queued messages
+          for (var i = 0; i < messageQueue.length; i++) {
+            var tempDiv = document.createElement('div');
+            tempDiv.innerHTML = messageQueue[i];
+
+            var fragment = document.createDocumentFragment();
+            while (tempDiv.firstChild) {
+              fragment.appendChild(tempDiv.firstChild);
+            }
+
+            chatBody.appendChild(fragment);
+          }
+
+          // Clear the queue
+          messageQueue = [];
+
+          // Clean up old messages
+          var messages = chatBody.getElementsByClassName('message-box');
+          messageCount = messages.length;
+
+          if (messageCount > MAX_MESSAGES) {
+            var toRemove = messageCount - MAX_MESSAGES;
+            for (var i = 0; i < toRemove; i++) {
+              if (messages.length > 0) {
+                chatBody.removeChild(messages[0]);
+              }
+            }
+            messageCount = chatBody.getElementsByClassName('message-box').length;
+          }
+
+          // Auto-scroll to bottom after flushing
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+      }
+
       function appendMessages(htmlString) {
+        // If user is scrolling, queue the messages instead of appending
+        if (isUserScrolling) {
+          messageQueue.push(htmlString);
+          return;
+        }
+
         var chatBody = document.getElementById('chat-body');
         var tempDiv = document.createElement('div');
         tempDiv.innerHTML = htmlString;
-
-        // Count incoming messages
-        var incomingCount = tempDiv.getElementsByClassName('message-box').length;
 
         // Use DocumentFragment for better performance
         var fragment = document.createDocumentFragment();
@@ -1120,6 +1165,7 @@ fn start_connection_for_tab(
       const chatContainer = document.getElementById('chat-container');
       const MAX_MESSAGES = 75; // Reduced from 150 to prevent DOM bloat in high-traffic channels
       let messageCount = 0;
+      let messageQueue = []; // Queue to hold messages when user is scrolling
 
       chatContainer.addEventListener('scroll', function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
@@ -1128,10 +1174,57 @@ fn start_connection_for_tab(
         clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {
           isUserScrolling = false;
+          // Flush queued messages after 2 second delay
+          flushMessageQueue();
         }, 2000);
       });
 
+      function flushMessageQueue() {
+        if (messageQueue.length > 0) {
+          var chatBody = document.getElementById('chat-body');
+
+          // Process all queued messages
+          for (var i = 0; i < messageQueue.length; i++) {
+            var tempDiv = document.createElement('div');
+            tempDiv.innerHTML = messageQueue[i];
+
+            var fragment = document.createDocumentFragment();
+            while (tempDiv.firstChild) {
+              fragment.appendChild(tempDiv.firstChild);
+            }
+
+            chatBody.appendChild(fragment);
+          }
+
+          // Clear the queue
+          messageQueue = [];
+
+          // Clean up old messages
+          var messages = chatBody.getElementsByClassName('message-box');
+          messageCount = messages.length;
+
+          if (messageCount > MAX_MESSAGES) {
+            var toRemove = messageCount - MAX_MESSAGES;
+            for (var i = 0; i < toRemove; i++) {
+              if (messages.length > 0) {
+                chatBody.removeChild(messages[0]);
+              }
+            }
+            messageCount = chatBody.getElementsByClassName('message-box').length;
+          }
+
+          // Auto-scroll to bottom after flushing
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+      }
+
       function appendMessages(htmlString) {
+        // If user is scrolling, queue the messages instead of appending
+        if (isUserScrolling) {
+          messageQueue.push(htmlString);
+          return;
+        }
+
         var chatBody = document.getElementById('chat-body');
         var tempDiv = document.createElement('div');
         tempDiv.innerHTML = htmlString;
