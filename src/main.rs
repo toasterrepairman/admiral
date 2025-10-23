@@ -39,6 +39,165 @@ enum ConnectionState {
     Connected(String), // channel name
 }
 
+// Consolidated HTML template for chat WebView
+fn get_chat_html_template() -> &'static str {
+    r#"
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            font-family: sans-serif;
+            background-color: transparent;
+            color: inherit;
+        }
+        #chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+        .message-box {
+            border: 1px solid rgba(153, 153, 153, 0.3);
+            border-radius: 8px;
+            padding: 8px;
+            margin-bottom: 4px;
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+        .message-header { display: flex; justify-content: space-between; }
+        .sender { font-weight: bold; }
+        .timestamp { color: rgba(170, 170, 170, 0.8); font-size: 0.8em; }
+        .message-content {
+            margin-top: 4px;
+            word-wrap: break-word;
+            line-height: 28px;
+            font-weight: light;
+        }
+        .message-content img {
+            height: 28px;
+            width: auto;
+            vertical-align: middle;
+            display: inline-block;
+            margin: 0 2px;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { color: #ffffff; }
+        }
+        @media (prefers-color-scheme: light) {
+            body { color: #000000; }
+            .message-box { background-color: rgba(0, 0, 0, 0.02); }
+        }
+      </style>
+    </head>
+    <body>
+    <div id="chat-container">
+      <div id="chat-body"></div>
+    </div>
+    <script>
+      let isUserScrolling = false;
+      let scrollTimeout = null;
+      const chatContainer = document.getElementById('chat-container');
+      const MAX_MESSAGES = 50; // Keep DOM small for better performance
+      let messageCount = 0;
+      let messageQueue = []; // Queue to hold messages when user is scrolling
+
+      chatContainer.addEventListener('scroll', function() {
+        const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
+        isUserScrolling = !isAtBottom;
+
+        clearTimeout(scrollTimeout);
+        scrollTimeout = setTimeout(() => {
+          isUserScrolling = false;
+          flushMessageQueue();
+        }, 2000);
+      });
+
+      function flushMessageQueue() {
+        if (messageQueue.length > 0) {
+          var chatBody = document.getElementById('chat-body');
+
+          for (var i = 0; i < messageQueue.length; i++) {
+            var tempDiv = document.createElement('div');
+            tempDiv.innerHTML = messageQueue[i];
+            var fragment = document.createDocumentFragment();
+            while (tempDiv.firstChild) {
+              fragment.appendChild(tempDiv.firstChild);
+            }
+            chatBody.appendChild(fragment);
+          }
+
+          messageQueue = [];
+
+          var messages = chatBody.getElementsByClassName('message-box');
+          messageCount = messages.length;
+
+          if (messageCount > MAX_MESSAGES) {
+            var toRemove = messageCount - MAX_MESSAGES;
+            for (var i = 0; i < toRemove; i++) {
+              if (messages.length > 0) {
+                chatBody.removeChild(messages[0]);
+              }
+            }
+            messageCount = chatBody.getElementsByClassName('message-box').length;
+          }
+
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+      }
+
+      function appendMessages(htmlString) {
+        if (isUserScrolling) {
+          messageQueue.push(htmlString);
+          return;
+        }
+
+        var chatBody = document.getElementById('chat-body');
+        var tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlString;
+
+        var fragment = document.createDocumentFragment();
+        while (tempDiv.firstChild) {
+          fragment.appendChild(tempDiv.firstChild);
+        }
+
+        chatBody.appendChild(fragment);
+
+        var messages = chatBody.getElementsByClassName('message-box');
+        messageCount = messages.length;
+
+        if (messageCount > MAX_MESSAGES) {
+          var toRemove = messageCount - MAX_MESSAGES;
+          for (var i = 0; i < toRemove; i++) {
+            if (messages.length > 0) {
+              chatBody.removeChild(messages[0]);
+            }
+          }
+          messageCount = chatBody.getElementsByClassName('message-box').length;
+        }
+
+        if (!isUserScrolling) {
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+      }
+
+      window.onload = function() {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      };
+    </script>
+    </body>
+    </html>
+    "#
+}
+
 // Client state that needs to be shared and controlled
 struct ClientState {
     client: Option<TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>>,
@@ -550,6 +709,33 @@ fn build_ui(app: &Application) {
 
     create_new_tab("New Tab", &tab_view, &tabs);
 
+    // Clear message queues when switching away from a tab
+    let tabs_for_selection = tabs.clone();
+    let tab_view_for_selection = tab_view.clone();
+    tab_view.connect_selected_page_notify(move |_| {
+        // When switching tabs, immediately drain all inactive tab queues
+        if let Some(selected_page) = tab_view_for_selection.selected_page() {
+            let tabs_map = tabs_for_selection.lock().unwrap();
+            for (_, tab_data) in tabs_map.iter() {
+                if tab_data.page != selected_page {
+                    // Drain the entire queue for the inactive tab
+                    let rx = tab_data.rx.lock().unwrap();
+                    let mut drained = 0;
+                    while let Ok(_) = rx.try_recv() {
+                        drained += 1;
+                        if drained > 200 {
+                            break; // Safety limit
+                        }
+                    }
+                    if drained > 0 {
+                        println!("Switched tabs: drained {} queued messages from inactive channel", drained);
+                    }
+                    drop(rx);
+                }
+            }
+        }
+    });
+
     let tabs_for_close = tabs.clone();
     tab_view.connect_close_page(move |_tab_view, page| {
         println!("Tab close requested");
@@ -574,118 +760,104 @@ fn build_ui(app: &Application) {
     let tabs_clone = tabs.clone();
     let tab_view_for_processing = tab_view.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-    let tabs_map = tabs_clone.lock().unwrap();
+        let tabs_map = tabs_clone.lock().unwrap();
 
-    // Only process the currently selected tab
-    if let Some(selected_page) = tab_view_for_processing.selected_page() {
-        for (_, tab_data) in tabs_map.iter() {
-            if tab_data.page != selected_page {
-                continue; // Skip inactive tabs
-            }
+        const MAX_BATCH_SIZE: usize = 30; // Conservative batch size for better responsiveness
+        const MAX_DRAIN_PER_TAB: usize = 50; // Limit draining to prevent blocking
 
-            // Throttle JS execution to prevent overwhelming WebView
-            let last_execution = *tab_data.last_js_execution.lock().unwrap();
-            if last_execution.elapsed() < std::time::Duration::from_millis(30) {
-                break;
-            }
+        if let Some(selected_page) = tab_view_for_processing.selected_page() {
+            // Process messages for ALL tabs, but only display for the active one
+            for (_, tab_data) in tabs_map.iter() {
+                let is_active_tab = tab_data.page == selected_page;
 
-            let mut messages_to_process = Vec::new();
-            let rx = tab_data.rx.lock().unwrap();
-            const MAX_BATCH_SIZE: usize = 50; // Reduced to prevent WebView overload in extreme channels
-            const QUEUE_SIZE_WARNING: usize = 500; // Warn if queue gets too large
-
-            loop {
-                if messages_to_process.len() >= MAX_BATCH_SIZE {
-                    break;
-                }
-                match rx.try_recv() {
-                    Ok(msg) => messages_to_process.push(msg),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
-                }
-            }
-
-            // Drain excess messages if queue is too large (prevents crash in extreme channels)
-            let mut queue_size = messages_to_process.len();
-            while queue_size < QUEUE_SIZE_WARNING {
-                match rx.try_recv() {
-                    Ok(_) => queue_size += 1,
-                    Err(_) => break,
-                }
-            }
-            if queue_size >= QUEUE_SIZE_WARNING {
-                let mut drained = 0;
-                while let Ok(_) = rx.try_recv() {
-                    drained += 1;
-                    if drained > 200 { break; } // Drain max 200 excess messages
-                }
-                if drained > 0 {
-                    eprintln!("Warning: Drained {} excess messages from overloaded queue", drained);
-                }
-            }
-
-            drop(rx);
-
-            if !messages_to_process.is_empty() {
-                let webview = tab_data.webview.clone();
-                let channel_id_for_closure = messages_to_process
-                    .first()
-                    .map(|msg| msg.channel_id.clone());
-
-                let last_js_execution = tab_data.last_js_execution.clone();
-
-                if let Some(channel_id_str) = channel_id_for_closure {
-                    let emote_map = get_emote_map(&channel_id_str);
-                    let mut html_content = String::new();
-                    for msg in &messages_to_process {
-                        html_content.push_str(&parse_message_html(msg, &emote_map));
-                        html_content.push('\n');
+                if is_active_tab {
+                    // Throttle JS execution to prevent overwhelming WebView
+                    let last_execution = *tab_data.last_js_execution.lock().unwrap();
+                    if last_execution.elapsed() < std::time::Duration::from_millis(30) {
+                        continue;
                     }
 
-                    let escaped_html = html_content
-                        .replace('\\', "\\\\")
-                        .replace('\'', "\\'")
-                        .replace('\n', "\\n")
-                        .replace('\r', "\\r");
+                    let mut messages_to_process = Vec::new();
+                    let rx = tab_data.rx.lock().unwrap();
 
-                    let js_code = format!(
-                        r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
-                        escaped_html
-                    );
+                    // Collect messages up to batch size
+                    while messages_to_process.len() < MAX_BATCH_SIZE {
+                        match rx.try_recv() {
+                            Ok(msg) => messages_to_process.push(msg),
+                            Err(_) => break,
+                        }
+                    }
+                    drop(rx);
 
-                    webview.evaluate_javascript(
-                        &js_code,
-                        None,
-                        None,
-                        None::<&adw::gio::Cancellable>,
-                        move |result| {
-                            match result {
-                                Ok(_) => {
-                                    *last_js_execution.lock().unwrap() = Instant::now();
-                                }
-                                Err(e) => {
-                                    eprintln!("Error running JS: {}", e);
-                                }
+                    if !messages_to_process.is_empty() {
+                        let webview = tab_data.webview.clone();
+                        let channel_id_for_closure = messages_to_process
+                            .first()
+                            .map(|msg| msg.channel_id.clone());
+                        let last_js_execution = tab_data.last_js_execution.clone();
+
+                        if let Some(channel_id_str) = channel_id_for_closure {
+                            let emote_map = get_emote_map(&channel_id_str);
+                            let mut html_content = String::new();
+                            for msg in &messages_to_process {
+                                html_content.push_str(&parse_message_html(msg, &emote_map));
+                                html_content.push('\n');
                             }
-                        },
-                    );
+
+                            let escaped_html = html_content
+                                .replace('\\', "\\\\")
+                                .replace('\'', "\\'")
+                                .replace('\n', "\\n")
+                                .replace('\r', "\\r");
+
+                            let js_code = format!(
+                                r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
+                                escaped_html
+                            );
+
+                            webview.evaluate_javascript(
+                                &js_code,
+                                None,
+                                None,
+                                None::<&adw::gio::Cancellable>,
+                                move |result| {
+                                    match result {
+                                        Ok(_) => {
+                                            *last_js_execution.lock().unwrap() = Instant::now();
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Error running JS: {}", e);
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    // For inactive tabs, aggressively drain the queue to prevent buildup
+                    let rx = tab_data.rx.lock().unwrap();
+                    let mut drained = 0;
+                    while drained < MAX_DRAIN_PER_TAB {
+                        match rx.try_recv() {
+                            Ok(_) => drained += 1,
+                            Err(_) => break,
+                        }
+                    }
+                    drop(rx);
                 }
-                break; // Only process one tab
             }
-            break; // Only process one tab
-        }
-    } else {
-            // If no tab is selected, drain messages from all tabs to prevent queue buildup
+        } else {
+            // No tab selected - drain all tabs
             for (_, tab_data) in tabs_map.iter() {
                 let rx = tab_data.rx.lock().unwrap();
                 let mut drained = 0;
-                while rx.try_recv().is_ok() {
-                    drained += 1;
-                    if drained > 100 { break; } // Prevent infinite loop
+                while drained < MAX_DRAIN_PER_TAB {
+                    match rx.try_recv() {
+                        Ok(_) => drained += 1,
+                        Err(_) => break,
+                    }
                 }
-                if drained > 0 {
-                    println!("Drained {} messages from inactive tab", drained);
-                }
+                drop(rx);
             }
         }
 
@@ -835,175 +1007,7 @@ fn create_new_tab(
     webview.set_settings(&settings);
 
     // Inject initial HTML and JavaScript with theme-aware styling
-    let initial_html = r#"
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            height: 100%;
-            overflow: hidden;
-        }
-        body {
-            display: flex;
-            flex-direction: column;
-            font-family: sans-serif;
-            background-color: transparent;
-            color: inherit;
-        }
-        #chat-container {
-            flex: 1;
-            overflow-y: auto;
-            padding: 8px;
-            display: flex;
-            flex-direction: column;
-        }
-        .message-box {
-            border: 1px solid rgba(153, 153, 153, 0.3);
-            border-radius: 8px;
-            padding: 8px;
-            margin-bottom: 4px;
-            background-color: rgba(255, 255, 255, 0.02);
-        }
-        .message-header { display: flex; justify-content: space-between; }
-        .sender { font-weight: bold; }
-        .timestamp { color: rgba(170, 170, 170, 0.8); font-size: 0.8em; }
-        .message-content {
-            margin-top: 4px;
-            word-wrap: break-word;
-            line-height: 28px;
-        }
-        .message-content img {
-            height: 28px;
-            width: auto;
-            vertical-align: middle;
-            display: inline-block;
-            margin: 0 2px;
-        }
-        @media (prefers-color-scheme: dark) {
-            body { color: #ffffff; }
-        }
-        @media (prefers-color-scheme: light) {
-            body { color: #000000; }
-            .message-box { background-color: rgba(0, 0, 0, 0.02); }
-        }
-      </style>
-    </head>
-    <body>
-    <div id="chat-container">
-      <div id="chat-body"></div>
-    </div>
-    <script>
-      let isUserScrolling = false;
-      let scrollTimeout = null;
-      const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 75; // Reduced from 150 to prevent DOM bloat in high-traffic channels
-      let messageCount = 0;
-      let messageQueue = []; // Queue to hold messages when user is scrolling
-
-      chatContainer.addEventListener('scroll', function() {
-        const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
-        isUserScrolling = !isAtBottom;
-
-        clearTimeout(scrollTimeout);
-        scrollTimeout = setTimeout(() => {
-          isUserScrolling = false;
-          // Flush queued messages after 2 second delay
-          flushMessageQueue();
-        }, 2000);
-      });
-
-      function flushMessageQueue() {
-        if (messageQueue.length > 0) {
-          var chatBody = document.getElementById('chat-body');
-
-          // Process all queued messages
-          for (var i = 0; i < messageQueue.length; i++) {
-            var tempDiv = document.createElement('div');
-            tempDiv.innerHTML = messageQueue[i];
-
-            var fragment = document.createDocumentFragment();
-            while (tempDiv.firstChild) {
-              fragment.appendChild(tempDiv.firstChild);
-            }
-
-            chatBody.appendChild(fragment);
-          }
-
-          // Clear the queue
-          messageQueue = [];
-
-          // Clean up old messages
-          var messages = chatBody.getElementsByClassName('message-box');
-          messageCount = messages.length;
-
-          if (messageCount > MAX_MESSAGES) {
-            var toRemove = messageCount - MAX_MESSAGES;
-            for (var i = 0; i < toRemove; i++) {
-              if (messages.length > 0) {
-                chatBody.removeChild(messages[0]);
-              }
-            }
-            messageCount = chatBody.getElementsByClassName('message-box').length;
-          }
-
-          // Auto-scroll to bottom after flushing
-          chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-      }
-
-      function appendMessages(htmlString) {
-        // If user is scrolling, queue the messages instead of appending
-        if (isUserScrolling) {
-          messageQueue.push(htmlString);
-          return;
-        }
-
-        var chatBody = document.getElementById('chat-body');
-        var tempDiv = document.createElement('div');
-        tempDiv.innerHTML = htmlString;
-
-        // Use DocumentFragment for better performance
-        var fragment = document.createDocumentFragment();
-        while (tempDiv.firstChild) {
-          fragment.appendChild(tempDiv.firstChild);
-        }
-
-        // Append new messages first
-        chatBody.appendChild(fragment);
-
-        // Update message count and remove old messages AFTER adding
-        var messages = chatBody.getElementsByClassName('message-box');
-        messageCount = messages.length;
-
-        if (messageCount > MAX_MESSAGES) {
-          var toRemove = messageCount - MAX_MESSAGES;
-          // Remove old messages from the beginning
-          for (var i = 0; i < toRemove; i++) {
-            if (messages.length > 0) {
-              chatBody.removeChild(messages[0]);
-            }
-          }
-          messageCount = chatBody.getElementsByClassName('message-box').length;
-        }
-
-        // Only auto-scroll if user isn't manually scrolling
-        if (!isUserScrolling) {
-          chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-      }
-
-      window.onload = function() {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-      };
-    </script>
-    </body>
-    </html>
-    "#;
-
-    webview.load_html(initial_html, None);
+    webview.load_html(get_chat_html_template(), None);
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
@@ -1041,7 +1045,7 @@ fn create_new_tab(
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    let (tx, rx) = mpsc::sync_channel(1000); // Increased capacity for high-throughput channels (250 msg/s)
+    let (tx, rx) = mpsc::sync_channel(100); // Reduced capacity - we drain background tabs aggressively
     let (error_tx, error_rx) = mpsc::channel();
 
     let tab_count = tabs.lock().unwrap().len();
@@ -1108,176 +1112,7 @@ fn start_connection_for_tab(
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
     *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
     // Clear WebView content and show chat view with theme-aware HTML
-    let initial_html_with_js = r#"
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            height: 100%;
-            overflow: hidden;
-        }
-        body {
-            display: flex;
-            flex-direction: column;
-            font-family: sans-serif;
-            background-color: transparent;
-            color: inherit;
-        }
-        #chat-container {
-            flex: 1;
-            overflow-y: auto;
-            padding: 8px;
-            display: flex;
-            flex-direction: column;
-        }
-        .message-box {
-            border: 1px solid rgba(153, 153, 153, 0.3);
-            border-radius: 8px;
-            padding: 8px;
-            margin-bottom: 4px;
-            background-color: rgba(255, 255, 255, 0.02);
-        }
-        .message-header { display: flex; justify-content: space-between; }
-        .sender { font-weight: bold; }
-        .timestamp { color: rgba(170, 170, 170, 0.8); font-size: 0.8em; }
-        .message-content {
-            margin-top: 4px;
-            word-wrap: break-word;
-            line-height: 28px;
-            font-weight: light;
-        }
-        .message-content img {
-            height: 28px;
-            width: auto;
-            vertical-align: middle;
-            display: inline-block;
-            margin: 0 2px;
-        }
-        @media (prefers-color-scheme: dark) {
-            body { color: #ffffff; }
-        }
-        @media (prefers-color-scheme: light) {
-            body { color: #000000; }
-            .message-box { background-color: rgba(0, 0, 0, 0.02); }
-        }
-      </style>
-    </head>
-    <body>
-    <div id="chat-container">
-      <div id="chat-body"></div>
-    </div>
-    <script>
-      let isUserScrolling = false;
-      let scrollTimeout = null;
-      const chatContainer = document.getElementById('chat-container');
-      const MAX_MESSAGES = 75; // Reduced from 150 to prevent DOM bloat in high-traffic channels
-      let messageCount = 0;
-      let messageQueue = []; // Queue to hold messages when user is scrolling
-
-      chatContainer.addEventListener('scroll', function() {
-        const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
-        isUserScrolling = !isAtBottom;
-
-        clearTimeout(scrollTimeout);
-        scrollTimeout = setTimeout(() => {
-          isUserScrolling = false;
-          // Flush queued messages after 2 second delay
-          flushMessageQueue();
-        }, 2000);
-      });
-
-      function flushMessageQueue() {
-        if (messageQueue.length > 0) {
-          var chatBody = document.getElementById('chat-body');
-
-          // Process all queued messages
-          for (var i = 0; i < messageQueue.length; i++) {
-            var tempDiv = document.createElement('div');
-            tempDiv.innerHTML = messageQueue[i];
-
-            var fragment = document.createDocumentFragment();
-            while (tempDiv.firstChild) {
-              fragment.appendChild(tempDiv.firstChild);
-            }
-
-            chatBody.appendChild(fragment);
-          }
-
-          // Clear the queue
-          messageQueue = [];
-
-          // Clean up old messages
-          var messages = chatBody.getElementsByClassName('message-box');
-          messageCount = messages.length;
-
-          if (messageCount > MAX_MESSAGES) {
-            var toRemove = messageCount - MAX_MESSAGES;
-            for (var i = 0; i < toRemove; i++) {
-              if (messages.length > 0) {
-                chatBody.removeChild(messages[0]);
-              }
-            }
-            messageCount = chatBody.getElementsByClassName('message-box').length;
-          }
-
-          // Auto-scroll to bottom after flushing
-          chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-      }
-
-      function appendMessages(htmlString) {
-        // If user is scrolling, queue the messages instead of appending
-        if (isUserScrolling) {
-          messageQueue.push(htmlString);
-          return;
-        }
-
-        var chatBody = document.getElementById('chat-body');
-        var tempDiv = document.createElement('div');
-        tempDiv.innerHTML = htmlString;
-
-        // Use DocumentFragment for better performance
-        var fragment = document.createDocumentFragment();
-        while (tempDiv.firstChild) {
-          fragment.appendChild(tempDiv.firstChild);
-        }
-
-        // Append new messages first
-        chatBody.appendChild(fragment);
-
-        // Update message count and remove old messages AFTER adding
-        var messages = chatBody.getElementsByClassName('message-box');
-        messageCount = messages.length;
-
-        if (messageCount > MAX_MESSAGES) {
-          var toRemove = messageCount - MAX_MESSAGES;
-          // Remove old messages from the beginning
-          for (var i = 0; i < toRemove; i++) {
-            if (messages.length > 0) {
-              chatBody.removeChild(messages[0]);
-            }
-          }
-          messageCount = chatBody.getElementsByClassName('message-box').length;
-        }
-
-        // Only auto-scroll if user isn't manually scrolling
-        if (!isUserScrolling) {
-          chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-      }
-
-      // Initial scroll to bottom
-      window.onload = function() {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-      };
-    </script>
-    </body>
-    </html>
-    "#;
-    tab_data.webview.load_html(initial_html_with_js, None);
+    tab_data.webview.load_html(get_chat_html_template(), None);
     tab_data.stack.set_visible_child_name("chat");
     tab_data.page.set_title(channel);
 
