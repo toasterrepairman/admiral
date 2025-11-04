@@ -92,7 +92,7 @@
 
         postBuild = ''
             # for desktop files
-            install -Dt $out/share/applications resources/com.example.Admiral.desktop
+            install -Dt $out/share/applications resources/com.github.Admiral.desktop
 
             install -Dt $out/share/icons resources/icon-admiral.png
         '';
