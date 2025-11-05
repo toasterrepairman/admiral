@@ -250,7 +250,7 @@ struct TabData {
 // In your main function, replace the rlimit code with:
 fn main() {
     let app = Application::builder()
-        .application_id("com.github.Admiral")
+        .application_id("com.toasterrepair.Admiral")
         .build();
 
     // Add this code right after setting up the app, before app.connect_activate
