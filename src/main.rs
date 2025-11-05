@@ -567,11 +567,6 @@ fn build_ui(app: &Application) {
     let header = HeaderBar::builder()
         .build();
 
-    // Create a label for the title that we can hide at small widths
-    let title_label = gtk::Label::new(Some("Admiral"));
-    title_label.add_css_class("title");
-    header.set_title_widget(Some(&title_label));
-
     let favorites_button = GtkButton::builder()
         .icon_name("non-starred-symbolic")
         .tooltip_text("Favorites")
@@ -925,30 +920,6 @@ fn build_ui(app: &Application) {
         tabs_for_window_close.lock().unwrap().clear();
         println!("All tabs disconnected on window close");
         glib::Propagation::Proceed
-    });
-
-    let tab_view_monitor = tab_view.clone();
-    let tab_bar_monitor = tab_bar.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        let n_pages = tab_view_monitor.n_pages();
-        glib::ControlFlow::Continue
-    });
-
-    // Monitor window width to remove title at small widths
-    let title_label_clone = title_label.clone();
-    let header_clone = header.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        if let Some(surface) = title_label_clone.native().and_then(|n| n.surface()) {
-            let width = surface.width();
-            if width < 450 {
-                // Remove title widget entirely at small widths
-                header_clone.set_title_widget(gtk::Widget::NONE);
-            } else {
-                // Restore title widget at larger widths
-                header_clone.set_title_widget(Some(&title_label_clone));
-            }
-        }
-        glib::ControlFlow::Continue
     });
 
     window.present();
