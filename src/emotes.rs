@@ -41,6 +41,11 @@ pub static MESSAGE_CSS: &str = "
     height: 28px;
     width: auto;
     margin: 0 2px;
+    max-height: 28px;
+    max-width: 28px;
+    pointer-events: none; /* Disable hover interactions on emotes */
+    will-change: auto; /* Prevent GPU acceleration hints */
+    backface-visibility: hidden; /* Optimize rendering */
 }
 .dim-label {
     color: alpha(#aaa, 0.8);
@@ -357,9 +362,7 @@ pub fn parse_message_html(msg: &PrivmsgMessage, emote_map: &HashMap<String, Stri
             html_content.push_str(&remote_url_escaped);
             html_content.push_str(r#"" alt=":"#);
             html_content.push_str(&emote_name_escaped);
-            html_content.push_str(r#":" title=":"#);
-            html_content.push_str(&emote_name_escaped);
-            html_content.push_str(r#":"/>"#);
+            html_content.push_str(r#":" loading="lazy" crossorigin="anonymous"/>"#);
         } else {
             // Not an emote, just add the word as escaped text
             html_content.push_str(&glib::markup_escape_text(word));

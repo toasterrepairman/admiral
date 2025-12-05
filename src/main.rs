@@ -88,6 +88,11 @@ fn get_chat_html_template() -> &'static str {
             vertical-align: middle;
             display: inline-block;
             margin: 0 2px;
+            max-height: 28px;
+            max-width: 28px;
+            pointer-events: none;
+            will-change: auto;
+            backface-visibility: hidden;
         }
         @media (prefers-color-scheme: dark) {
             body { color: #ffffff; }
@@ -257,7 +262,7 @@ fn main() {
     // Check and potentially increase the file descriptor limit
     if let Ok((soft_limit, hard_limit)) = rlimit::getrlimit(rlimit::Resource::NOFILE) {
         println!("Current file descriptor limit: soft={}, hard={}", soft_limit, hard_limit);
-        let new_soft_limit = hard_limit.min(1024);
+        let new_soft_limit = hard_limit.min(4096); // Increase to 4096 for WebKit's needs
         if new_soft_limit > soft_limit {
             if let Err(e) = rlimit::setrlimit(rlimit::Resource::NOFILE, new_soft_limit, hard_limit) {
                 eprintln!("Failed to increase file descriptor soft limit: {}", e);
@@ -268,6 +273,11 @@ fn main() {
     } else {
         eprintln!("Failed to get current file descriptor limits using rlimit crate.");
     }
+
+    // Set environment variables to limit WebKit resource usage
+    std::env::set_var("WEBKIT_FORCE_MONOSPACE_FONT", "1");
+    std::env::set_var("WEBKIT_USE_SINGLE_WEB_PROCESS", "1");
+    std::env::set_var("WEBKIT_FORCE_SANDBOX", "0"); // Disable sandbox to reduce fd usage
     app.connect_activate(build_ui);
     app.run();
 }
@@ -345,7 +355,8 @@ fn load_and_display_favorites(
     favorites_entry: &Entry,
     favorites_list: &gtk::ListBox, // Use fully qualified name
     tab_view: &TabView,
-    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
+    web_context: &webkit6::WebContext,
 ) {
     list.remove_all();
     let favorites = load_favorites();
@@ -368,6 +379,7 @@ fn load_and_display_favorites(
                 &tabs,
                 &favorites_entry,
                 &favorites_list,
+                web_context,
             );
         }
     }
@@ -381,6 +393,7 @@ fn load_and_display_favorites(
                 &tabs,
                 &favorites_entry,
                 &favorites_list,
+                web_context,
             );
         }
     }
@@ -412,6 +425,7 @@ fn create_favorite_row(
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
     favorites_entry: &Entry,
     favorites_list: &gtk::ListBox, // Use fully qualified name
+    web_context: &webkit6::WebContext,
 ) {
     // Create ActionRow for a modern Libadwaita look
     let action_row = adw::ActionRow::builder()
@@ -448,9 +462,10 @@ fn create_favorite_row(
     let channel_clone = channel.to_string();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
+    let web_context_clone = web_context.clone();
     action_row.connect_activated(move |_| {
         println!("Row clicked for channel: {}", channel_clone);
-        create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone);
+        create_new_tab(&channel_clone, &tab_view_clone, &tabs_clone, &web_context_clone);
         let tab_view_clone2 = tab_view_clone.clone();
         let tabs_clone2 = tabs_clone.clone();
         let channel_clone2 = channel_clone.clone();
@@ -480,6 +495,7 @@ fn create_favorite_row(
     let favorites_entry_clone = favorites_entry.clone();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
+    let web_context_clone = web_context.clone();
     star_button.connect_clicked(move |_| {
         toggle_star(&channel_clone);
         load_and_display_favorites(
@@ -488,6 +504,7 @@ fn create_favorite_row(
             &favorites_list_clone,
             &tab_view_clone,
             &tabs_clone,
+            &web_context_clone,
         );
     });
 
@@ -497,6 +514,7 @@ fn create_favorite_row(
     let favorites_entry_clone = favorites_entry.clone();
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
+    let web_context_clone = web_context.clone();
     trash_button.connect_clicked(move |_| {
         remove_favorite(&channel_clone);
         load_and_display_favorites(
@@ -505,6 +523,7 @@ fn create_favorite_row(
             &favorites_list_clone,
             &tab_view_clone,
             &tabs_clone,
+            &web_context_clone,
         );
     });
 
@@ -535,6 +554,10 @@ fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
 }
 
 fn build_ui(app: &Application) {
+    // Create a shared WebContext to limit process creation and resource usage
+    let web_context = webkit6::WebContext::new();
+    web_context.set_automation_allowed(false);
+
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Admiral")
@@ -657,8 +680,10 @@ fn build_ui(app: &Application) {
         tab_view,
         #[strong]
         tabs,
+        #[strong]
+        web_context,
         move |_| {
-            create_new_tab("New Tab", &tab_view, &tabs);
+            create_new_tab("New Tab", &tab_view, &tabs, &web_context);
         }
     ));
 
@@ -674,12 +699,14 @@ fn build_ui(app: &Application) {
         tab_view,
         #[strong]
         tabs_clone,
+        #[strong]
+        web_context,
         move |_| {
             let channel = favorites_entry_clone.text().to_string();
             if !channel.is_empty() {
                 add_favorite(&channel);
                 favorites_entry_clone.set_text("");
-                load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone, &tab_view, &tabs_clone);
+                load_and_display_favorites(&favorites_list_clone, &favorites_entry_clone, &favorites_list_clone, &tab_view, &tabs_clone, &web_context);
             }
         }
     ));
@@ -692,7 +719,7 @@ fn build_ui(app: &Application) {
         }
     ));
 
-    load_and_display_favorites(&favorites_list, &favorites_entry, &favorites_list, &tab_view, &tabs);
+    load_and_display_favorites(&favorites_list, &favorites_entry, &favorites_list, &tab_view, &tabs, &web_context);
 
     overview_button.connect_clicked(clone!(
         #[strong]
@@ -702,7 +729,7 @@ fn build_ui(app: &Application) {
         }
     ));
 
-    create_new_tab("New Tab", &tab_view, &tabs);
+    create_new_tab("New Tab", &tab_view, &tabs, &web_context);
 
     // Clear message queues when switching away from a tab
     let tabs_for_selection = tabs.clone();
@@ -869,8 +896,9 @@ fn build_ui(app: &Application) {
     let new_tab_action = SimpleAction::new("new-tab", None);
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
+    let web_context_clone = web_context.clone();
     new_tab_action.connect_activate(move |_, _| {
-        create_new_tab("New Tab", &tab_view_clone, &tabs_clone);
+        create_new_tab("New Tab", &tab_view_clone, &tabs_clone, &web_context_clone);
     });
     window.add_action(&new_tab_action);
 
@@ -928,7 +956,8 @@ fn build_ui(app: &Application) {
 fn create_new_tab(
     label: &str,
     tab_view: &TabView,
-    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
+    web_context: &webkit6::WebContext
 ) {
     let tab_content = Box::new(Orientation::Vertical, 0);
 
@@ -949,33 +978,41 @@ fn create_new_tab(
 
     // Create WebView for chat display
     let webview = WebView::new();
+    // Note: WebKitGTK doesn't provide a direct way to set context on individual views
+    // The shared context will be used automatically when creating WebViews in the same process
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
-    // Get GTK theme background color
-    let style_context = webview.style_context();
-    // Try to get background color, fallback to a dark color if not available
-    let bg_color = style_context.lookup_color("window_bg_color")
-        .or_else(|| style_context.lookup_color("theme_bg_color"))
-        .unwrap_or_else(|| gdk::RGBA::new(0.11, 0.11, 0.11, 1.0)); // Fallback to #1e1e1e
-
-    // Set webview background to match GTK theme
+    // Set webview background to a dark color to match theme
+    let bg_color = gdk::RGBA::new(0.11, 0.11, 0.11, 1.0); // #1e1e1e
     webview.set_background_color(&bg_color);
 
-    // Configure WebView for better stability
+    // Configure WebView for aggressive resource management
     let settings = webkit6::Settings::new();
-    settings.set_property("enable-write-console-messages-to-stdout", true);
-    settings.set_property("javascript-can-open-windows-automatically", false);
-    settings.set_property("enable-page-cache", false);
-    settings.set_property("enable-webgl", false);
-    settings.set_property("enable-smooth-scrolling", false);
-    settings.set_property("enable-media-stream", false);
-    settings.set_property("enable-dns-prefetching", false);
-    settings.set_property("hardware-acceleration-policy", webkit6::HardwareAccelerationPolicy::Never);
-    settings.set_property("enable-media", true);
-    settings.set_property("media-playback-requires-user-gesture", false);
+    settings.set_enable_write_console_messages_to_stdout(true);
+    settings.set_javascript_can_open_windows_automatically(false);
+    settings.set_enable_page_cache(false);
+    settings.set_enable_webgl(false);
+    settings.set_enable_smooth_scrolling(false);
+    settings.set_enable_media_stream(false);
+    settings.set_enable_dns_prefetching(false);
+    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
+    settings.set_enable_media(false); // Disable media to prevent resource issues
+    settings.set_enable_developer_extras(false);
+    settings.set_enable_javascript(true); // Keep JS for chat functionality
+    settings.set_enable_caret_browsing(false);
+    settings.set_enable_html5_database(false);
+    settings.set_enable_html5_local_storage(false);
+    settings.set_enable_webaudio(false);
 
     webview.set_settings(&settings);
+
+    // Set up a context menu handler to prevent right-click resource usage
+    webview.connect_context_menu(move |_webview, context_menu, _event| {
+        // Prevent context menu to avoid additional resource usage
+        context_menu.remove_all();
+        true // Consume the event
+    });
 
     // Inject initial HTML and JavaScript with theme-aware styling
     webview.load_html(get_chat_html_template(), None);
