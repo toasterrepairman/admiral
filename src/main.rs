@@ -983,8 +983,8 @@ fn create_new_tab(
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
-    // Set webview background to a dark color to match theme
-    let bg_color = gdk::RGBA::new(0.11, 0.11, 0.11, 1.0); // #1e1e1e
+    // Set webview background to transparent to match window theme
+    let bg_color = gdk::RGBA::new(0.0, 0.0, 0.0, 0.0); // Transparent
     webview.set_background_color(&bg_color);
 
     // Configure WebView for aggressive resource management
@@ -996,7 +996,7 @@ fn create_new_tab(
     settings.set_enable_smooth_scrolling(false);
     settings.set_enable_media_stream(false);
     settings.set_enable_dns_prefetching(false);
-    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
+    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
     settings.set_enable_media(false); // Disable media to prevent resource issues
     settings.set_enable_developer_extras(false);
     settings.set_enable_javascript(true); // Keep JS for chat functionality
