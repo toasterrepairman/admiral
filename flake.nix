@@ -59,7 +59,7 @@
         mesa.drivers
         libva
         libva-utils
-        vaapiVdpau
+        libva-vdpau-driver
         libvdpau-va-gl
         intel-media-driver  # For Intel GPUs
         # Optional: Add GST debugging tools
