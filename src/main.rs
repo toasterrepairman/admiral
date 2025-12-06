@@ -247,6 +247,23 @@ fn get_chat_html_template() -> &'static str {
     "#
 }
 
+fn get_chat_html_template_with_color(background_color: Option<&str>) -> String {
+    let base_template = get_chat_html_template();
+
+    if let Some(color) = background_color {
+        let css_replacement = format!("            background-color: {}; /* Solid background prevents overdraw */", color);
+        let light_css_replacement = format!("            body {{ background-color: {}; }}", color);
+        let light_msg_css_replacement = format!("            .message-box {{ background-color: {}; }}", color);
+
+        base_template
+            .replace("            background-color: rgba(0, 0, 0, 0.95); /* Solid background prevents overdraw */", &css_replacement)
+            .replace("            body { color: #000000; background-color: rgba(255, 255, 255, 0.95); }", &light_css_replacement)
+            .replace("            .message-box { background-color: rgba(0, 0, 0, 0.02); }", &light_msg_css_replacement)
+    } else {
+        base_template.to_string()
+    }
+}
+
 // Client state that needs to be shared and controlled
 struct ClientState {
     client: Option<TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>>,
@@ -278,6 +295,7 @@ impl ClientState {
 struct Favorites {
     channels: Vec<String>,
     starred: Vec<String>, // List of starred channels
+    background_color: Option<String>, // Custom background color hex code
 }
 
 struct TabData {
@@ -392,6 +410,103 @@ fn toggle_star(channel: &str) {
 fn is_starred(channel: &str) -> bool {
     let favorites = load_favorites();
     favorites.starred.contains(&channel.to_lowercase())
+}
+
+fn get_background_color() -> Option<String> {
+    let favorites = load_favorites();
+    favorites.background_color
+}
+
+fn set_background_color(color: Option<&str>) {
+    let mut favorites = load_favorites();
+    favorites.background_color = color.map(|c| c.to_string());
+    save_favorites(&favorites);
+}
+
+fn validate_hex_color(color: &str) -> bool {
+    if color.len() != 7 || !color.starts_with('#') {
+        return false;
+    }
+    color[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn apply_background_color_to_tabs(
+    tab_view: &TabView,
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
+    color: Option<&str>,
+) {
+    let tabs_map = tabs.lock().unwrap();
+    for (_, tab_data) in tabs_map.iter() {
+        // Update WebKit background color
+        if let Some(color_hex) = color {
+            // Parse hex color to RGBA
+            if let Ok(rgb) = u32::from_str_radix(&color_hex[1..], 16) {
+                let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
+                let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
+                let b = (rgb & 0xFF) as f32 / 255.0;
+                let bg_color = gdk::RGBA::new(r, g, b, 0.95);
+                tab_data.webview.set_background_color(&bg_color);
+
+                // Update the CSS in the WebView
+                let js_code = format!(
+                    r#"
+                    if (typeof updateBackgroundColor === 'function') {{
+                        updateBackgroundColor('{}');
+                    }} else {{
+                        // Create the function if it doesn't exist
+                        const style = document.createElement('style');
+                        style.textContent = `
+                            body {{ background-color: {} !important; }}
+                            @media (prefers-color-scheme: light) {{
+                                body {{ background-color: {} !important; }}
+                            }}
+                        `;
+                        document.head.appendChild(style);
+
+                        window.updateBackgroundColor = function(color) {{
+                            document.body.style.backgroundColor = color + 'e6'; // Add 90% opacity
+                        }};
+                    }}
+                    "#,
+                    color_hex, color_hex, color_hex
+                );
+
+                tab_data.webview.evaluate_javascript(
+                    &js_code,
+                    None,
+                    None,
+                    None::<&adw::gio::Cancellable>,
+                    move |result| {
+                        if let Err(e) = result {
+                            eprintln!("Error updating background color: {}", e);
+                        }
+                    },
+                );
+            }
+        } else {
+            // Reset to default background
+            let bg_color = gdk::RGBA::new(0.0, 0.0, 0.0, 0.95);
+            tab_data.webview.set_background_color(&bg_color);
+
+            let js_code = r#"
+            if (typeof updateBackgroundColor === 'function') {
+                updateBackgroundColor('rgba(0, 0, 0, 0.95)');
+            }
+            "#;
+
+            tab_data.webview.evaluate_javascript(
+                js_code,
+                None,
+                None,
+                None::<&adw::gio::Cancellable>,
+                move |result| {
+                    if let Err(e) = result {
+                        eprintln!("Error resetting background color: {}", e);
+                    }
+                },
+            );
+        }
+    }
 }
 
 fn load_and_display_favorites(
@@ -650,6 +765,31 @@ fn build_ui(app: &Application) {
     popover_content.set_margin_end(6);
     popover_content.set_width_request(300);
 
+    // Background color setting
+    let color_row = adw::ActionRow::builder()
+        .title("Background Color")
+        .subtitle("Enter hex code (e.g., #1a1a1a)")
+        .build();
+
+    let color_entry = Entry::builder()
+        .placeholder_text("#000000")
+        .max_length(7)
+        .width_chars(8)
+        .build();
+
+    // Load current background color
+    if let Some(color) = get_background_color() {
+        color_entry.set_text(&color);
+    }
+
+    color_row.add_suffix(&color_entry);
+    popover_content.append(&color_row);
+
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.set_margin_top(6);
+    separator.set_margin_bottom(6);
+    popover_content.append(&separator);
+
     let favorites_entry = Entry::builder()
         .placeholder_text("Add channel to favorites")
         .build();
@@ -734,6 +874,27 @@ fn build_ui(app: &Application) {
     let tabs_clone = tabs.clone();
     let favorites_list_clone = favorites_list.clone();
     let favorites_entry_clone = favorites_entry.clone();
+    let tab_view_for_color = tab_view.clone();
+    let tabs_for_color = tabs.clone();
+
+    // Color entry change handler
+    color_entry.connect_changed(clone!(
+        #[strong]
+        tab_view_for_color,
+        #[strong]
+        tabs_for_color,
+        move |entry| {
+            let color_text = entry.text().to_string();
+            if color_text.is_empty() || color_text == "#" {
+                set_background_color(None);
+                apply_background_color_to_tabs(&tab_view_for_color, &tabs_for_color, None);
+            } else if validate_hex_color(&color_text) {
+                set_background_color(Some(&color_text));
+                apply_background_color_to_tabs(&tab_view_for_color, &tabs_for_color, Some(&color_text));
+            }
+        }
+    ));
+
     add_favorite_button.connect_clicked(clone!(
         #[strong]
         favorites_list_clone,
@@ -774,6 +935,11 @@ fn build_ui(app: &Application) {
     ));
 
     create_new_tab("New Tab", &tab_view, &tabs, &web_context);
+
+    // Apply any saved background color to existing tabs
+    if let Some(color) = get_background_color() {
+        apply_background_color_to_tabs(&tab_view, &tabs, Some(&color));
+    }
 
     // Clear message queues when switching away from a tab
     let tabs_for_selection = tabs.clone();
@@ -1027,9 +1193,20 @@ fn create_new_tab(
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
-    // Set webview background to semi-opaque to prevent overdraw
-    // This matches the background color in the HTML template
-    let bg_color = gdk::RGBA::new(0.0, 0.0, 0.0, 0.95); // Semi-opaque black
+    // Set webview background to saved color or default
+    let bg_color = if let Some(color_hex) = get_background_color() {
+        // Parse hex color to RGBA
+        if let Ok(rgb) = u32::from_str_radix(&color_hex[1..], 16) {
+            let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
+            let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
+            let b = (rgb & 0xFF) as f32 / 255.0;
+            gdk::RGBA::new(r, g, b, 0.95)
+        } else {
+            gdk::RGBA::new(0.0, 0.0, 0.0, 0.95) // Fallback to black
+        }
+    } else {
+        gdk::RGBA::new(0.0, 0.0, 0.0, 0.95) // Default black
+    };
     webview.set_background_color(&bg_color);
 
     // Configure WebView for aggressive resource management
@@ -1059,8 +1236,9 @@ fn create_new_tab(
         true // Consume the event
     });
 
-    // Inject initial HTML and JavaScript with theme-aware styling
-    webview.load_html(get_chat_html_template(), None);
+    // Inject initial HTML and JavaScript with custom background color
+    let html_template = get_chat_html_template_with_color(get_background_color().as_deref());
+    webview.load_html(&html_template, None);
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
@@ -1164,8 +1342,9 @@ fn start_connection_for_tab(
 ) {
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
     *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
-    // Clear WebView content and show chat view with theme-aware HTML
-    tab_data.webview.load_html(get_chat_html_template(), None);
+    // Clear WebView content and show chat view with custom background color
+    let html_template = get_chat_html_template_with_color(get_background_color().as_deref());
+    tab_data.webview.load_html(&html_template, None);
     tab_data.stack.set_visible_child_name("chat");
     tab_data.page.set_title(channel);
 
