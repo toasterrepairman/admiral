@@ -1218,7 +1218,7 @@ fn create_new_tab(
     settings.set_enable_smooth_scrolling(false);
     settings.set_enable_media_stream(false);
     settings.set_enable_dns_prefetching(false);
-    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
+    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
     settings.set_enable_media(false); // Disable media to prevent resource issues
     settings.set_enable_developer_extras(false);
     settings.set_enable_javascript(true); // Keep JS for chat functionality
