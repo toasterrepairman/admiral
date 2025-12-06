@@ -94,9 +94,70 @@ fn get_chat_html_template() -> &'static str {
             margin: 0 2px;
             max-height: 28px;
             max-width: 28px;
-            pointer-events: none;
+            pointer-events: auto;
+            cursor: pointer;
             will-change: auto;
             backface-visibility: hidden;
+            transition: transform 0.1s ease;
+        }
+        .message-content img:hover {
+            transform: scale(1.1);
+        }
+        /* Emote popover styles */
+        .emote-popover {
+            position: fixed;
+            background-color: rgba(30, 30, 30, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 12px;
+            z-index: 10000;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            min-width: 200px;
+            max-width: 300px;
+            pointer-events: auto;
+        }
+        .emote-popover img {
+            width: 80px;
+            height: 80px;
+            display: block;
+            margin: 0 auto 8px;
+            object-fit: contain;
+            border-radius: 4px;
+            background-color: rgba(255, 255, 255, 0.1);
+            padding: 4px;
+        }
+        .emote-popover-name {
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+        .emote-popover-url {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.6);
+            text-align: center;
+            word-break: break-all;
+            font-family: monospace;
+        }
+        .emote-popover-close {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            background: none;
+            border: none;
+            color: rgba(255, 255, 255, 0.6);
+            cursor: pointer;
+            font-size: 16px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .emote-popover-close:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.9);
         }
         /* Buffer element for maintaining scroll position */
         .scroll-buffer {
@@ -240,7 +301,116 @@ fn get_chat_html_template() -> &'static str {
       window.onload = function() {
         chatContainer.scrollTop = chatContainer.scrollHeight;
         lastScrollHeight = chatContainer.scrollHeight;
+        setupEmotePopovers();
       };
+
+      // Emote popover functionality
+      let currentPopover = null;
+
+      function setupEmotePopovers() {
+        console.log('Setting up emote popovers');
+
+        // Single click listener for everything
+        document.addEventListener('click', function(event) {
+          const target = event.target;
+          console.log('Clicked element:', target.tagName, target.alt, target.src);
+
+          // If clicking on an emote, show popover
+          if (target.tagName === 'IMG' &&
+              ((target.alt && target.alt.startsWith(':') && target.alt.endsWith(':')) ||
+               (target.src && (target.src.includes('7tv.app') || target.src.includes('emote'))))) {
+            console.log('Emote clicked!');
+            event.preventDefault();
+            event.stopPropagation();
+            showEmotePopover(target);
+            return;
+          }
+
+          // If clicking on close button, hide popover
+          if (currentPopover && target.classList.contains('emote-popover-close')) {
+            console.log('Close button clicked');
+            event.preventDefault();
+            event.stopPropagation();
+            hideEmotePopover();
+            return;
+          }
+
+          // If clicking outside popover, hide it
+          if (currentPopover && !currentPopover.contains(target)) {
+            console.log('Clicked outside popover');
+            hideEmotePopover();
+            return;
+          }
+        });
+
+        // Close popover on escape key
+        document.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape' && currentPopover) {
+            console.log('Escape key pressed');
+            hideEmotePopover();
+          }
+        });
+      }
+
+      function showEmotePopover(emoteImg) {
+        console.log('Showing popover for emote:', emoteImg.src);
+
+        // Hide existing popover if any
+        hideEmotePopover();
+
+        const emoteName = emoteImg.alt && emoteImg.alt.startsWith(':') && emoteImg.alt.endsWith(':')
+          ? emoteImg.alt.substring(1, emoteImg.alt.length - 1)
+          : 'Emote';
+        const emoteUrl = emoteImg.src;
+
+        console.log('Emote name:', emoteName, 'URL:', emoteUrl);
+
+        // Create popover element
+        const popover = document.createElement('div');
+        popover.className = 'emote-popover';
+        popover.style.display = 'block';
+        popover.innerHTML = `
+          <button class="emote-popover-close" title="Close">&times;</button>
+          <img src="${emoteUrl}" alt="${emoteName}" />
+          <div class="emote-popover-name">${emoteName}</div>
+          <div class="emote-popover-url">${emoteUrl}</div>
+        `;
+
+        // Add close button functionality is now handled by the main event listener
+
+        // Position popover near the clicked emote
+        const rect = emoteImg.getBoundingClientRect();
+        const popoverWidth = 250;
+        const popoverHeight = 150;
+
+        let left = rect.left + (rect.width / 2) - (popoverWidth / 2);
+        let top = rect.bottom + 10;
+
+        // Ensure popover stays within viewport
+        if (left < 10) left = 10;
+        if (left + popoverWidth > window.innerWidth - 10) {
+          left = window.innerWidth - popoverWidth - 10;
+        }
+        if (top + popoverHeight > window.innerHeight - 10) {
+          top = rect.top - popoverHeight - 10;
+        }
+
+        popover.style.left = left + 'px';
+        popover.style.top = top + 'px';
+
+        document.body.appendChild(popover);
+        currentPopover = popover;
+
+        console.log('Popover added to DOM');
+      }
+
+      function hideEmotePopover() {
+        if (currentPopover) {
+          console.log('Hiding popover');
+          document.body.removeChild(currentPopover);
+          currentPopover = null;
+        }
+      }
     </script>
     </body>
     </html>
