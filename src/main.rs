@@ -93,7 +93,7 @@ fn get_chat_html_template() -> &'static str {
             display: inline-block;
             margin: 0 2px;
             max-height: 28px;
-            max-width: 28px;
+            max-width: none;
             pointer-events: auto;
             cursor: pointer;
             will-change: auto;

@@ -42,7 +42,7 @@ pub static MESSAGE_CSS: &str = "
     width: auto;
     margin: 0 2px;
     max-height: 28px;
-    max-width: 28px;
+    max-width: none;
     pointer-events: auto;
     cursor: pointer;
     will-change: auto;
