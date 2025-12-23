@@ -1266,6 +1266,28 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
+    // Keep-alive timer to prevent webviews from going dormant when window is inactive
+    // This is needed on Linux when switching virtual desktops - the webview would otherwise
+    // stop rendering and blank out until you return
+    let tabs_keepalive = tabs.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        let tabs_map = tabs_keepalive.lock().unwrap();
+        for (_, tab_data) in tabs_map.iter() {
+            // Evaluate a no-op JavaScript to keep the webview context alive
+            // This forces WebKit to maintain the rendering state even when unmapped
+            let webview = tab_data.webview.clone();
+            webview.evaluate_javascript(
+                "/* keep-alive */",
+                None,
+                None,
+                None::<&adw::gio::Cancellable>,
+                |_| {},
+            );
+        }
+        drop(tabs_map);
+        glib::ControlFlow::Continue
+    });
+
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
         cleanup_media_file_cache();
