@@ -439,6 +439,7 @@ struct ClientState {
     client: Option<TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>>,
     runtime: Option<Runtime>,
     join_handle: Option<thread::JoinHandle<()>>,
+    paused: bool, // Track if this tab's message processing is paused
 }
 
 impl ClientState {
@@ -447,6 +448,7 @@ impl ClientState {
             client: None,
             runtime: Some(Runtime::new().unwrap()),
             join_handle: None,
+            paused: false, // Start unpaused
         }
     }
     fn disconnect(&mut self) {
@@ -457,6 +459,7 @@ impl ClientState {
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new().unwrap());
         }
+        self.paused = false; // Reset pause state on disconnect
     }
 }
 
@@ -1111,15 +1114,33 @@ fn build_ui(app: &Application) {
         apply_background_color_to_tabs(&tab_view, &tabs, Some(&color));
     }
 
-    // Clear message queues when switching away from a tab
+    // Pause/resume IRC connections and clear queues when switching tabs
     let tabs_for_selection = tabs.clone();
     let tab_view_for_selection = tab_view.clone();
     tab_view.connect_selected_page_notify(move |_| {
-        // When switching tabs, immediately drain all inactive tab queues completely
+        // When switching tabs, pause inactive tabs and resume the active one
         if let Some(selected_page) = tab_view_for_selection.selected_page() {
             let tabs_map = tabs_for_selection.lock().unwrap();
             for (_, tab_data) in tabs_map.iter() {
-                if tab_data.page != selected_page {
+                let is_active_tab = tab_data.page == selected_page;
+
+                if is_active_tab {
+                    // Resume the active tab
+                    let mut client_state = tab_data.client_state.lock().unwrap();
+                    if client_state.paused {
+                        client_state.paused = false;
+                        println!("Resuming message processing for active tab");
+                    }
+                    drop(client_state);
+                } else {
+                    // Pause the inactive tab and drain its queue
+                    let mut client_state = tab_data.client_state.lock().unwrap();
+                    if !client_state.paused {
+                        client_state.paused = true;
+                        println!("Pausing message processing for inactive tab");
+                    }
+                    drop(client_state);
+
                     // Drain the entire queue for the inactive tab (no limit)
                     let rx = tab_data.rx.lock().unwrap();
                     let mut drained = 0;
@@ -1127,7 +1148,7 @@ fn build_ui(app: &Application) {
                         drained += 1;
                     }
                     if drained > 0 {
-                        println!("Switched tabs: drained {} queued messages from inactive channel", drained);
+                        println!("Drained {} queued messages from inactive channel", drained);
                     }
                     drop(rx);
                 }
@@ -1461,7 +1482,7 @@ fn create_new_tab(
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    let (tx, rx) = mpsc::sync_channel(100); // Reduced capacity - we drain background tabs aggressively
+    let (tx, rx) = mpsc::sync_channel(50); // Reduced capacity - inactive tabs are paused, so we need less buffer
     let (error_tx, error_rx) = mpsc::channel();
 
     let tab_count = tabs.lock().unwrap().len();
@@ -1565,17 +1586,27 @@ fn start_connection_for_tab(
                 *state = ConnectionState::Connected(channel.clone());
             }
 
-            // Around line 1010-1020 in the async block
+            // Message reception loop with pause support
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    // SyncSender will block if channel is full, preventing unbounded growth
-                    match tx.send(msg.clone()) {
-                        Ok(_) => {},
-                        Err(e) => {
-                            eprintln!("Failed to send message to UI thread: {}", e);
-                            break;
+                    // Check if this tab is paused (inactive)
+                    let is_paused = {
+                        let state = client_state_thread.lock().unwrap();
+                        state.paused
+                    };
+
+                    // Only send messages to UI thread if not paused
+                    if !is_paused {
+                        // SyncSender will block if channel is full, preventing unbounded growth
+                        match tx.send(msg.clone()) {
+                            Ok(_) => {},
+                            Err(e) => {
+                                eprintln!("Failed to send message to UI thread: {}", e);
+                                break;
+                            }
                         }
                     }
+                    // If paused, silently drop the message to prevent queue buildup
                 }
             }
 
