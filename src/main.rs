@@ -1115,19 +1115,16 @@ fn build_ui(app: &Application) {
     let tabs_for_selection = tabs.clone();
     let tab_view_for_selection = tab_view.clone();
     tab_view.connect_selected_page_notify(move |_| {
-        // When switching tabs, immediately drain all inactive tab queues
+        // When switching tabs, immediately drain all inactive tab queues completely
         if let Some(selected_page) = tab_view_for_selection.selected_page() {
             let tabs_map = tabs_for_selection.lock().unwrap();
             for (_, tab_data) in tabs_map.iter() {
                 if tab_data.page != selected_page {
-                    // Drain the entire queue for the inactive tab
+                    // Drain the entire queue for the inactive tab (no limit)
                     let rx = tab_data.rx.lock().unwrap();
                     let mut drained = 0;
                     while let Ok(_) = rx.try_recv() {
                         drained += 1;
-                        if drained > 200 {
-                            break; // Safety limit
-                        }
                     }
                     if drained > 0 {
                         println!("Switched tabs: drained {} queued messages from inactive channel", drained);
@@ -1161,7 +1158,7 @@ fn build_ui(app: &Application) {
 
     let tabs_clone = tabs.clone();
     let tab_view_for_processing = tab_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         let tabs_map = tabs_clone.lock().unwrap();
 
         const MAX_BATCH_SIZE: usize = 30; // Conservative batch size for better responsiveness
@@ -1235,17 +1232,6 @@ fn build_ui(app: &Application) {
                             );
                         }
                     }
-                } else {
-                    // For inactive tabs, aggressively drain the queue to prevent buildup
-                    let rx = tab_data.rx.lock().unwrap();
-                    let mut drained = 0;
-                    while drained < MAX_DRAIN_PER_TAB {
-                        match rx.try_recv() {
-                            Ok(_) => drained += 1,
-                            Err(_) => break,
-                        }
-                    }
-                    drop(rx);
                 }
             }
         } else {
@@ -1270,21 +1256,28 @@ fn build_ui(app: &Application) {
     // This is needed on Linux when switching virtual desktops - the webview would otherwise
     // stop rendering and blank out until you return
     let tabs_keepalive = tabs.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-        let tabs_map = tabs_keepalive.lock().unwrap();
-        for (_, tab_data) in tabs_map.iter() {
-            // Evaluate a no-op JavaScript to keep the webview context alive
-            // This forces WebKit to maintain the rendering state even when unmapped
-            let webview = tab_data.webview.clone();
-            webview.evaluate_javascript(
-                "/* keep-alive */",
-                None,
-                None,
-                None::<&adw::gio::Cancellable>,
-                |_| {},
-            );
+    let tab_view_keepalive = tab_view.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(10), move || {
+        // Only keep-alive the active tab to reduce CPU usage
+        if let Some(selected_page) = tab_view_keepalive.selected_page() {
+            let tabs_map = tabs_keepalive.lock().unwrap();
+            for (_, tab_data) in tabs_map.iter() {
+                if tab_data.page == selected_page {
+                    // Evaluate a no-op JavaScript to keep the webview context alive
+                    // This forces WebKit to maintain the rendering state even when unmapped
+                    let webview = tab_data.webview.clone();
+                    webview.evaluate_javascript(
+                        "/* keep-alive */",
+                        None,
+                        None,
+                        None::<&adw::gio::Cancellable>,
+                        |_| {},
+                    );
+                    break; // Only process the active tab
+                }
+            }
+            drop(tabs_map);
         }
-        drop(tabs_map);
         glib::ControlFlow::Continue
     });
 
