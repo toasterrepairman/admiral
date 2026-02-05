@@ -1405,13 +1405,13 @@ fn create_new_tab(
     let settings = webkit6::Settings::new();
     settings.set_enable_write_console_messages_to_stdout(true);
     settings.set_javascript_can_open_windows_automatically(false);
-    settings.set_enable_page_cache(false);
+    settings.set_enable_page_cache(true);
     settings.set_enable_webgl(false);
     settings.set_enable_smooth_scrolling(false);
-    settings.set_enable_media_stream(false);
-    settings.set_enable_dns_prefetching(false);
-    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
-    settings.set_enable_media(false); // Disable media to prevent resource issues
+    settings.set_enable_media_stream(true);
+    settings.set_enable_dns_prefetching(true);
+    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
+    settings.set_enable_media(true); // Disable media to prevent resource issues
     settings.set_enable_developer_extras(false);
     settings.set_enable_javascript(true); // Keep JS for chat functionality
     settings.set_enable_caret_browsing(false);

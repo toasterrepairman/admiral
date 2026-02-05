@@ -11,6 +11,7 @@ use std::{thread, collections::HashSet};
 use std::error::Error as StdError;
 use serde::Deserialize;
 use once_cell::sync::Lazy;
+use url::Url;
 
 pub static MESSAGE_CSS: &str = "
 .message-box {
@@ -45,7 +46,6 @@ pub static MESSAGE_CSS: &str = "
     max-width: none;
     pointer-events: auto;
     cursor: pointer;
-    will-change: auto;
     backface-visibility: hidden;
     transition: transform 0.1s ease;
 }
@@ -274,6 +274,7 @@ fn download_emote_urls(channel_id: &str) -> Result<HashMap<String, String>, Box<
             if let Some(emote_data) = &active_emote.data {
                 if let Some(host_info) = &emote_data.host {
                     if host_info.url.trim().is_empty() {
+                        eprintln!("WARNING: Emote '{}' has empty host URL, skipping", active_emote.name);
                         continue;
                     }
                     let file_opt = find_best_image_file(&host_info.files);
@@ -281,17 +282,94 @@ fn download_emote_urls(channel_id: &str) -> Result<HashMap<String, String>, Box<
                         // Construct the full URL for the specific file
                         let base_emote_url = host_info.url.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("//");
                         let emote_remote_url = format!("https://{}/{}", base_emote_url, file_to_use.name);
+
+                        // Validate the constructed URL
+                        if let Err(e) = validate_emote_url(&emote_remote_url, &active_emote.name) {
+                            eprintln!("ERROR: Failed to validate emote URL: {}", e);
+                            continue;
+                        }
+
                         remote_emote_map.insert(active_emote.name, emote_remote_url);
+                    } else {
+                        eprintln!("WARNING: Emote '{}' has no suitable image file (available files: {:?}), skipping",
+                            active_emote.name, host_info.files.iter().map(|f| &f.name).collect::<Vec<_>>());
                     }
+                } else {
+                    eprintln!("WARNING: Emote '{}' has no host information, skipping", active_emote.name);
                 }
+            } else {
+                eprintln!("WARNING: Emote '{}' has no data, skipping", active_emote.name);
             }
         }
+    } else {
+        eprintln!("WARNING: Channel {} has no emote set configured", channel_id);
     }
 
+    println!("Successfully loaded {} emotes for channel {}", remote_emote_map.len(), channel_id);
     Ok(remote_emote_map)
 }
 
 // --- Helper Functions ---
+
+/// Validates a URL and returns an error description if invalid
+fn validate_emote_url(url_str: &str, emote_name: &str) -> Result<(), String> {
+    // Check if URL is empty
+    if url_str.trim().is_empty() {
+        return Err(format!("URL is empty for emote '{}'", emote_name));
+    }
+
+    // Check if it starts with https://
+    if !url_str.starts_with("https://") {
+        return Err(format!(
+            "URL for emote '{}' does not start with https://: {}",
+            emote_name, url_str
+        ));
+    }
+
+    // Try to parse as URL
+    let parsed_url = Url::parse(url_str).map_err(|e| {
+        format!(
+            "Failed to parse URL for emote '{}': {} - URL was: {}",
+            emote_name, e, url_str
+        )
+    })?;
+
+    // Check if scheme is https
+    if parsed_url.scheme() != "https" {
+        return Err(format!(
+            "URL for emote '{}' does not use HTTPS scheme: {}",
+            emote_name, parsed_url.scheme()
+        ));
+    }
+
+    // Check if host exists
+    if parsed_url.host().is_none() {
+        return Err(format!(
+            "URL for emote '{}' is missing host: {}",
+            emote_name, url_str
+        ));
+    }
+
+    // Check if host is valid (not empty, has a dot)
+    let host = parsed_url.host_str().unwrap();
+    if !host.contains('.') {
+        return Err(format!(
+            "URL for emote '{}' has invalid host: {}",
+            emote_name, host
+        ));
+    }
+
+    // Check if path exists
+    if parsed_url.path().is_empty() {
+        return Err(format!(
+            "URL for emote '{}' is missing file path: {}",
+            emote_name, url_str
+        ));
+    }
+
+    Ok(())
+}
+
 fn find_best_image_file(files: &[ImageFile]) -> Option<&ImageFile> {
     // Prioritize 1x versions, then prefer GIF for animation, then PNG for quality, then first available
     if let Some(file) = files.iter().find(|f| f.name.contains("1x") && f.format.eq_ignore_ascii_case("gif")) {
@@ -364,11 +442,11 @@ pub fn parse_message_html(msg: &PrivmsgMessage, emote_map: &HashMap<String, Stri
             // It's an emote, add the <img> tag with the remote URL
             let emote_name_escaped = glib::markup_escape_text(word);
             let remote_url_escaped = glib::markup_escape_text(remote_url);
-            html_content.push_str(r#"<img src=""#);
+            html_content.push_str(r#"<img width="28" height="28" src=""#);
             html_content.push_str(&remote_url_escaped);
             html_content.push_str(r#"" alt=":"#);
             html_content.push_str(&emote_name_escaped);
-            html_content.push_str(r#":" title="Click to view emote details" loading="lazy" crossorigin="anonymous"/>"#);
+            html_content.push_str(r#":" title="Click to view emote details" crossorigin="anonymous"/>"#);
         } else {
             // Not an emote, just add the word as escaped text
             html_content.push_str(&glib::markup_escape_text(word));

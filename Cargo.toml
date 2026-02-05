@@ -35,3 +35,4 @@ regex = "1.11.1"
 toml = "0.9.7"
 rlimit = "0.10.2"
 webkit6 = { version = "0.5.0" } # Use webkit2gtk 0.18.x
+url = "2.5.4"

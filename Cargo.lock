@@ -25,6 +25,7 @@ dependencies = [
  "tokio",
  "toml",
  "twitch-irc",
+ "url",
  "webkit6",
 ]
 
