@@ -126,8 +126,8 @@ pub fn cleanup_emote_cache() {
     let mut last_fetch = LAST_FETCH_TIME.write().unwrap();
     let now = Instant::now();
 
-    // Collect channels to remove
-    let channels_to_remove: Vec<String> = last_fetch
+    // Collect channels to remove based on time
+    let mut channels_to_remove: Vec<String> = last_fetch
         .iter()
         .filter_map(|(channel_id, time)| {
             if now.duration_since(*time) >= Duration::from_secs(3600) {
@@ -138,15 +138,47 @@ pub fn cleanup_emote_cache() {
         })
         .collect();
 
+    // Also check total emote count and remove oldest entries if exceeding limit
+    const MAX_TOTAL_EMOTES: usize = 5000;
+    let maps_read = EMOTE_MAPS.read().unwrap();
+    let total_emotes: usize = maps_read.values().map(|map| map.len()).sum();
+    drop(maps_read);
+
+    if total_emotes > MAX_TOTAL_EMOTES {
+        println!("Total emote count {} exceeds limit {}, pruning oldest entries", total_emotes, MAX_TOTAL_EMOTES);
+
+        // Sort channels by last fetch time and remove oldest ones
+        let mut channels_by_time: Vec<(String, Instant)> = last_fetch
+            .iter()
+            .map(|(id, time)| (id.clone(), *time))
+            .collect();
+
+        channels_by_time.sort_by_key(|(_, time)| *time);
+
+        // Remove oldest channels until we're under the limit
+        let mut removed_count = 0;
+        for (channel_id, _) in channels_by_time {
+            if total_emotes - removed_count <= MAX_TOTAL_EMOTES * 3 / 4 {
+                // Stop when we're at 75% of limit to avoid frequent cleanup
+                break;
+            }
+            channels_to_remove.push(channel_id.clone());
+            removed_count += EMOTE_MAPS.read().unwrap().get(&channel_id).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+
     // Remove from all caches
     for channel_id in channels_to_remove {
         last_fetch.remove(&channel_id);
         EMOTE_MAPS.write().unwrap().remove(&channel_id);
         DOWNLOADING_CHANNELS.write().unwrap().remove(&channel_id);
-        println!("Removed emote data for inactive channel: {}", channel_id);
+        println!("Removed emote data for channel: {}", channel_id);
     }
 
-    println!("Cleaned up cache, {} channels remaining.", last_fetch.len());
+    // Log final statistics
+    let remaining_channels = last_fetch.len();
+    let remaining_emotes: usize = EMOTE_MAPS.read().unwrap().values().map(|map| map.len()).sum();
+    println!("Cleaned up cache, {} channels and {} emotes remaining.", remaining_channels, remaining_emotes);
 }
 
 pub fn cleanup_media_file_cache() {

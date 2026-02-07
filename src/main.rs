@@ -6,7 +6,7 @@ use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, T
 use gtk::{gdk, ScrolledWindow, Button, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
 use webkit6::WebView;
 use webkit6::prelude::WebViewExt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
 use glib::clone;
@@ -192,7 +192,7 @@ fn get_chat_html_template() -> &'static str {
       let lastScrollHeight = 0;
       let lastScrollTop = 0;
 
-      chatContainer.addEventListener('scroll', function() {
+      scrollEventHandler = function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
         isUserScrolling = !isAtBottom;
 
@@ -205,7 +205,8 @@ fn get_chat_html_template() -> &'static str {
           isUserScrolling = false;
           flushMessageQueue();
         }, 2000);
-      });
+      };
+      chatContainer.addEventListener('scroll', scrollEventHandler);
 
       function maintainScrollPosition() {
         const currentScrollHeight = chatContainer.scrollHeight;
@@ -306,12 +307,38 @@ fn get_chat_html_template() -> &'static str {
 
       // Emote popover functionality
       let currentPopover = null;
+      let clickEventHandler = null;
+      let keydownEventHandler = null;
+      let scrollEventHandler = null;
+
+      function cleanupEventListeners() {
+        // Remove event listeners to prevent memory leaks
+        if (clickEventHandler) {
+          document.removeEventListener('click', clickEventHandler);
+          clickEventHandler = null;
+        }
+        if (keydownEventHandler) {
+          document.removeEventListener('keydown', keydownEventHandler);
+          keydownEventHandler = null;
+        }
+        if (scrollEventHandler) {
+          chatContainer.removeEventListener('scroll', scrollEventHandler);
+          scrollEventHandler = null;
+        }
+        // Force garbage collection if available
+        if (window.gc) {
+          window.gc();
+        }
+      }
 
       function setupEmotePopovers() {
         console.log('Setting up emote popovers');
 
-        // Single click listener for everything
-        document.addEventListener('click', function(event) {
+        // Clean up any existing event listeners first
+        cleanupEventListeners();
+
+        // Store event handler reference so we can remove it later
+        clickEventHandler = function(event) {
           const target = event.target;
           console.log('Clicked element:', target.tagName, target.alt, target.src);
 
@@ -341,15 +368,18 @@ fn get_chat_html_template() -> &'static str {
             hideEmotePopover();
             return;
           }
-        });
+        };
 
-        // Close popover on escape key
-        document.addEventListener('keydown', function(event) {
+        keydownEventHandler = function(event) {
           if (event.key === 'Escape' && currentPopover) {
             console.log('Escape key pressed');
             hideEmotePopover();
           }
-        });
+        };
+
+        // Add event listeners with references
+        document.addEventListener('click', clickEventHandler);
+        document.addEventListener('keydown', keydownEventHandler);
       }
 
       function showEmotePopover(emoteImg) {
@@ -407,7 +437,10 @@ fn get_chat_html_template() -> &'static str {
       function hideEmotePopover() {
         if (currentPopover) {
           console.log('Hiding popover');
-          document.body.removeChild(currentPopover);
+          // Remove all child event listeners by cloning
+          const newPopover = currentPopover.cloneNode(false);
+          currentPopover.parentNode.replaceChild(newPopover, currentPopover);
+          document.body.removeChild(newPopover);
           currentPopover = null;
         }
       }
@@ -862,10 +895,55 @@ fn create_favorite_row(
     list.append(&action_row);
 }
 
+fn cleanup_webview(webview: &WebView) {
+    // Evaluate JavaScript to force garbage collection and cleanup before reloading
+    let cleanup_js = r#"
+        // Clean up event listeners
+        if (typeof cleanupEventListeners === 'function') {
+            cleanupEventListeners();
+        }
+
+        // Clear message queue
+        if (typeof messageQueue !== 'undefined') {
+            messageQueue = [];
+        }
+
+        // Clear all messages from DOM
+        const chatBody = document.getElementById('chat-body');
+        if (chatBody) {
+            chatBody.innerHTML = '<div class="scroll-buffer"></div>';
+        }
+
+        // Force garbage collection if available
+        if (window.gc) {
+            window.gc();
+        }
+
+        // Clear any timers
+        if (typeof scrollTimeout !== 'undefined') {
+            clearTimeout(scrollTimeout);
+        }
+    "#;
+
+    webview.evaluate_javascript(
+        cleanup_js,
+        None,
+        None,
+        None::<&adw::gio::Cancellable>,
+        |_| {},
+    );
+
+    // Small delay to allow cleanup to complete
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
+
 fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
     println!("Disconnecting tab...");
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Disconnected;
     tab_data.client_state.lock().unwrap().disconnect();
+
+    // Aggressive cleanup before clearing WebView
+    cleanup_webview(&tab_data.webview);
 
     // Load a data URI to clear content without fetching anything
     tab_data.webview.load_uri("about:blank");
@@ -1309,6 +1387,49 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
+    // Periodic WebView memory garbage collection - run every 5 minutes
+    let tabs_gc = tabs.clone();
+    let tab_view_gc = tab_view.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(300), move || {
+        // Force garbage collection on all tabs to prevent memory leaks
+        if let Some(selected_page) = tab_view_gc.selected_page() {
+            let tabs_map = tabs_gc.lock().unwrap();
+            for (_, tab_data) in tabs_map.iter() {
+                // Only garbage collect the active tab to save CPU
+                if tab_data.page == selected_page {
+                    let webview = tab_data.webview.clone();
+                    webview.evaluate_javascript(
+                        r#"
+                        // Force garbage collection if available
+                        if (window.gc) {
+                            window.gc();
+                        }
+                        // Trigger cleanup of event listeners
+                        if (typeof cleanupEventListeners === 'function') {
+                            cleanupEventListeners();
+                            // Re-setup after cleanup
+                            if (typeof setupEmotePopovers === 'function') {
+                                setupEmotePopovers();
+                            }
+                        }
+                        "#,
+                        None,
+                        None,
+                        None::<&adw::gio::Cancellable>,
+                        |result| {
+                            if let Err(e) = result {
+                                eprintln!("Error during WebView garbage collection: {}", e);
+                            }
+                        },
+                    );
+                    break;
+                }
+            }
+            drop(tabs_map);
+        }
+        glib::ControlFlow::Continue
+    });
+
     let new_tab_action = SimpleAction::new("new-tab", None);
     let tab_view_clone = tab_view.clone();
     let tabs_clone = tabs.clone();
@@ -1546,15 +1667,20 @@ fn start_connection_for_tab(
     channel: &str,
     tab_data: &Arc<TabData>
 ) {
+    // Convert channel name to lowercase as Twitch requires lowercase channel names
+    let channel = channel.to_lowercase();
+
     *tab_data.connection_state.lock().unwrap() = ConnectionState::Connecting;
-    *tab_data.channel_name.lock().unwrap() = Some(channel.to_string());
+    *tab_data.channel_name.lock().unwrap() = Some(channel.clone());
+
+    // Aggressive cleanup before loading new content
+    cleanup_webview(&tab_data.webview);
+
     // Clear WebView content and show chat view with custom background color
     let html_template = get_chat_html_template_with_color(get_background_color().as_deref());
     tab_data.webview.load_html(&html_template, None);
     tab_data.stack.set_visible_child_name("chat");
-    tab_data.page.set_title(channel);
-
-    let channel = channel.to_string();
+    tab_data.page.set_title(&channel);
     let connection_state = tab_data.connection_state.clone();
     let client_state_thread = tab_data.client_state.clone();
     let client_state_store = tab_data.client_state.clone();
@@ -1562,6 +1688,10 @@ fn start_connection_for_tab(
     let error_tx = tab_data.error_tx.clone();
 
     let mut state = tab_data.client_state.lock().unwrap();
+    // Create a new runtime if one doesn't exist (e.g., after reconnect)
+    if state.runtime.is_none() {
+        state.runtime = Some(Runtime::new().unwrap());
+    }
     let runtime = state.runtime.take().unwrap();
     drop(state);
 
@@ -1597,11 +1727,32 @@ fn start_connection_for_tab(
 
                     // Only send messages to UI thread if not paused
                     if !is_paused {
-                        // SyncSender will block if channel is full, preventing unbounded growth
-                        match tx.send(msg.clone()) {
+                        // Try to send with timeout to prevent blocking indefinitely
+                        // If UI thread can't keep up, we'll drop the message
+                        let send_result = tx.try_send(msg.clone());
+
+                        match send_result {
                             Ok(_) => {},
-                            Err(e) => {
-                                eprintln!("Failed to send message to UI thread: {}", e);
+                            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                // Channel is full - UI thread is overwhelmed
+                                // Drop the message to prevent IRC thread from blocking
+                                use std::time::{SystemTime, UNIX_EPOCH};
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+
+                                // Use atomic to track last warning time globally
+                                static LAST_WARNING: AtomicU64 = AtomicU64::new(0);
+                                let last_warning = LAST_WARNING.load(Ordering::Relaxed);
+
+                                if now.saturating_sub(last_warning) >= 5 {
+                                    eprintln!("UI thread message queue full, dropping messages to prevent freeze");
+                                    LAST_WARNING.store(now, Ordering::Relaxed);
+                                }
+                            }
+                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                eprintln!("UI thread disconnected, stopping message processing");
                                 break;
                             }
                         }
