@@ -52,14 +52,31 @@ fn get_chat_html_template() -> &'static str {
             height: 100%;
             overflow: hidden;
         }
+        html {
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: transparent;
+        }
         body {
             display: flex;
             flex-direction: column;
             font-family: sans-serif;
-            background-color: rgba(0, 0, 0, 0.95); /* Solid background prevents overdraw */
+            background-color: transparent;
             color: inherit;
-            will-change: transform; /* Hint for GPU acceleration */
-            transform: translateZ(0); /* Force compositing layer */
+            will-change: transform;
+            transform: translateZ(0);
+            -webkit-transform: translateZ(0);
+            -webkit-backface-visibility: hidden;
+            backface-visibility: hidden;
+            -webkit-perspective: 1000;
+            perspective: 1000;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
         }
         #chat-container {
             flex: 1;
@@ -169,8 +186,17 @@ fn get_chat_html_template() -> &'static str {
             body { color: #ffffff; }
         }
         @media (prefers-color-scheme: light) {
-            body { color: #000000; background-color: rgba(255, 255, 255, 0.95); }
+            body {
+                color: #000000;
+                background-color: transparent;
+            }
             .message-box { background-color: rgba(0, 0, 0, 0.02); }
+        }
+        #chat-container {
+            position: relative;
+            will-change: transform;
+            -webkit-transform: translateZ(0);
+            transform: translateZ(0);
         }
       </style>
     </head>
@@ -303,6 +329,19 @@ fn get_chat_html_template() -> &'static str {
         chatContainer.scrollTop = chatContainer.scrollHeight;
         lastScrollHeight = chatContainer.scrollHeight;
         setupEmotePopovers();
+
+        // Keep rendering active to prevent tab unloading on desktop switch
+        let frameCount = 0;
+        function keepRendering() {
+          frameCount++;
+          if (frameCount % 60 === 0) {
+            // Force a minimal repaint every ~1 second (at 60fps)
+            chatContainer.style.opacity = '0.9999';
+            chatContainer.style.opacity = '1';
+          }
+          requestAnimationFrame(keepRendering);
+        }
+        keepRendering();
       };
 
       // Emote popover functionality
@@ -542,10 +581,14 @@ fn main() {
         eprintln!("Failed to get current file descriptor limits using rlimit crate.");
     }
 
-    // Set environment variables to limit WebKit resource usage
+    // Set environment variables to optimize WebKit for chat rendering
     std::env::set_var("WEBKIT_FORCE_MONOSPACE_FONT", "1");
     std::env::set_var("WEBKIT_USE_SINGLE_WEB_PROCESS", "1");
-    std::env::set_var("WEBKIT_FORCE_SANDBOX", "0"); // Disable sandbox to reduce fd usage
+    std::env::set_var("WEBKIT_FORCE_SANDBOX", "0");
+    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "0");
+    std::env::set_var("WEBKIT_NO_TIMEOUT", "1");
+    std::env::set_var("WEBKIT_USE_SYSTEM_MALLOC", "0");
+    std::env::set_var("WEBKIT_DISABLE_PAGE_CACHE", "0");
     app.connect_activate(build_ui);
     app.run();
 }
@@ -967,6 +1010,8 @@ fn build_ui(app: &Application) {
     // Create a shared WebContext to limit process creation and resource usage
     let web_context = webkit6::WebContext::new();
     web_context.set_automation_allowed(false);
+    web_context.set_cache_model(webkit6::CacheModel::DocumentViewer);
+    web_context.set_spell_checking_enabled(false);
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -1356,7 +1401,7 @@ fn build_ui(app: &Application) {
     // stop rendering and blank out until you return
     let tabs_keepalive = tabs.clone();
     let tab_view_keepalive = tab_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_secs(10), move || {
+    glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
         // Only keep-alive the active tab to reduce CPU usage
         if let Some(selected_page) = tab_view_keepalive.selected_page() {
             let tabs_map = tabs_keepalive.lock().unwrap();
@@ -1366,7 +1411,7 @@ fn build_ui(app: &Application) {
                     // This forces WebKit to maintain the rendering state even when unmapped
                     let webview = tab_data.webview.clone();
                     webview.evaluate_javascript(
-                        "/* keep-alive */",
+                        "if(document.body) { document.body.offsetHeight; void 0; }",
                         None,
                         None,
                         None::<&adw::gio::Cancellable>,
@@ -1520,7 +1565,7 @@ fn create_new_tab(
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
-    // Set webview background to saved color or default
+    // Set webview background to saved color or default (transparent to let GTK background show)
     let bg_color = if let Some(color_hex) = get_background_color() {
         // Parse hex color to RGBA
         if let Ok(rgb) = u32::from_str_radix(&color_hex[1..], 16) {
@@ -1532,11 +1577,11 @@ fn create_new_tab(
             gdk::RGBA::new(0.0, 0.0, 0.0, 0.95) // Fallback to black
         }
     } else {
-        gdk::RGBA::new(0.0, 0.0, 0.0, 0.95) // Default black
+        gdk::RGBA::new(0.0, 0.0, 0.0, 0.0) // Default transparent (alpha = 0)
     };
     webview.set_background_color(&bg_color);
 
-    // Configure WebView for aggressive resource management
+    // Configure WebView for aggressive resource management and chat optimization
     let settings = webkit6::Settings::new();
     settings.set_enable_write_console_messages_to_stdout(true);
     settings.set_javascript_can_open_windows_automatically(false);
@@ -1546,15 +1591,35 @@ fn create_new_tab(
     settings.set_enable_media_stream(true);
     settings.set_enable_dns_prefetching(true);
     settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
-    settings.set_enable_media(true); // Disable media to prevent resource issues
+    settings.set_enable_media(true);
     settings.set_enable_developer_extras(false);
-    settings.set_enable_javascript(true); // Keep JS for chat functionality
+    settings.set_enable_javascript(true);
     settings.set_enable_caret_browsing(false);
     settings.set_enable_html5_database(false);
     settings.set_enable_html5_local_storage(false);
     settings.set_enable_webaudio(false);
+    settings.set_enable_hyperlink_auditing(false);
+    settings.set_print_backgrounds(true);
+    settings.set_enable_spatial_navigation(false);
+    settings.set_enable_tabs_to_links(false);
+    settings.set_javascript_can_access_clipboard(false);
+    settings.set_media_playback_requires_user_gesture(false);
+    settings.set_allow_file_access_from_file_urls(false);
+    settings.set_allow_universal_access_from_file_urls(false);
+    settings.set_enable_offline_web_application_cache(false);
+    settings.set_zoom_text_only(false);
+    settings.set_enable_fullscreen(false);
+    settings.set_enable_resizable_text_areas(true);
+    settings.set_draw_compositing_indicators(false);
+    settings.set_enable_site_specific_quirks(false);
+    settings.set_enable_encrypted_media(false);
+    settings.set_enable_mediasource(false);
 
     webview.set_settings(&settings);
+
+    // Additional WebView settings to prevent unloading and flickering
+    webview.set_zoom_level(1.0);
+    webview.set_is_muted(false);
 
     // Set up a context menu handler to prevent right-click resource usage
     webview.connect_context_menu(move |_webview, context_menu, _event| {
