@@ -217,8 +217,9 @@ fn get_chat_html_template() -> &'static str {
       let messageQueue = [];
       let lastScrollHeight = 0;
       let lastScrollTop = 0;
+      const emoteCache = new Map();
 
-      scrollEventHandler = function() {
+      let scrollEventHandler = function() {
         const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop <= chatContainer.clientHeight + 50;
         isUserScrolling = !isAtBottom;
 
@@ -230,7 +231,7 @@ fn get_chat_html_template() -> &'static str {
         scrollTimeout = setTimeout(() => {
           isUserScrolling = false;
           flushMessageQueue();
-        }, 2000);
+        }, 3000);
       };
       chatContainer.addEventListener('scroll', scrollEventHandler);
 
@@ -272,6 +273,12 @@ fn get_chat_html_template() -> &'static str {
       function flushMessageQueue() {
         if (messageQueue.length > 0) {
           const batchSize = Math.min(messageQueue.length, 20); // Process in smaller batches
+
+          for (let i = 0; i < batchSize; i++) {
+            const emoteUrls = extractEmoteUrls(messageQueue[i]);
+            emoteUrls.forEach(url => preloadEmote(url));
+          }
+
           const fragment = document.createDocumentFragment();
 
           for (let i = 0; i < batchSize; i++) {
@@ -307,6 +314,9 @@ fn get_chat_html_template() -> &'static str {
           }
           return;
         }
+
+        const emoteUrls = extractEmoteUrls(htmlString);
+        emoteUrls.forEach(url => preloadEmote(url));
 
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = htmlString;
@@ -348,7 +358,24 @@ fn get_chat_html_template() -> &'static str {
       let currentPopover = null;
       let clickEventHandler = null;
       let keydownEventHandler = null;
-      let scrollEventHandler = null;
+
+      function preloadEmote(url) {
+        if (!emoteCache.has(url)) {
+          emoteCache.set(url, true);
+          const img = new Image();
+          img.src = url;
+        }
+      }
+
+      function extractEmoteUrls(htmlString) {
+        const urls = [];
+        const regex = /src="([^"]+)"/g;
+        let match;
+        while ((match = regex.exec(htmlString)) !== null) {
+          urls.push(match[1]);
+        }
+        return urls;
+      }
 
       function cleanupEventListeners() {
         // Remove event listeners to prevent memory leaks
@@ -359,10 +386,6 @@ fn get_chat_html_template() -> &'static str {
         if (keydownEventHandler) {
           document.removeEventListener('keydown', keydownEventHandler);
           keydownEventHandler = null;
-        }
-        if (scrollEventHandler) {
-          chatContainer.removeEventListener('scroll', scrollEventHandler);
-          scrollEventHandler = null;
         }
         // Force garbage collection if available
         if (window.gc) {
@@ -376,16 +399,13 @@ fn get_chat_html_template() -> &'static str {
         // Clean up any existing event listeners first
         cleanupEventListeners();
 
-        // Store event handler reference so we can remove it later
         clickEventHandler = function(event) {
           const target = event.target;
-          console.log('Clicked element:', target.tagName, target.alt, target.src);
 
           // If clicking on an emote, show popover
           if (target.tagName === 'IMG' &&
               ((target.alt && target.alt.startsWith(':') && target.alt.endsWith(':')) ||
                (target.src && (target.src.includes('7tv.app') || target.src.includes('emote'))))) {
-            console.log('Emote clicked!');
             event.preventDefault();
             event.stopPropagation();
             showEmotePopover(target);
@@ -393,8 +413,7 @@ fn get_chat_html_template() -> &'static str {
           }
 
           // If clicking on close button, hide popover
-          if (currentPopover && target.classList.contains('emote-popover-close')) {
-            console.log('Close button clicked');
+          if (currentPopover && (target.classList.contains('emote-popover-close') || target.closest('.emote-popover-close'))) {
             event.preventDefault();
             event.stopPropagation();
             hideEmotePopover();
@@ -403,7 +422,6 @@ fn get_chat_html_template() -> &'static str {
 
           // If clicking outside popover, hide it
           if (currentPopover && !currentPopover.contains(target)) {
-            console.log('Clicked outside popover');
             hideEmotePopover();
             return;
           }
@@ -411,19 +429,16 @@ fn get_chat_html_template() -> &'static str {
 
         keydownEventHandler = function(event) {
           if (event.key === 'Escape' && currentPopover) {
-            console.log('Escape key pressed');
             hideEmotePopover();
           }
         };
 
         // Add event listeners with references
-        document.addEventListener('click', clickEventHandler);
+        document.addEventListener('click', clickEventHandler, true);
         document.addEventListener('keydown', keydownEventHandler);
       }
 
       function showEmotePopover(emoteImg) {
-        console.log('Showing popover for emote:', emoteImg.src);
-
         // Hide existing popover if any
         hideEmotePopover();
 
@@ -431,8 +446,6 @@ fn get_chat_html_template() -> &'static str {
           ? emoteImg.alt.substring(1, emoteImg.alt.length - 1)
           : 'Emote';
         const emoteUrl = emoteImg.src;
-
-        console.log('Emote name:', emoteName, 'URL:', emoteUrl);
 
         // Create popover element
         const popover = document.createElement('div');
@@ -444,8 +457,6 @@ fn get_chat_html_template() -> &'static str {
           <div class="emote-popover-name">${emoteName}</div>
           <div class="emote-popover-url">${emoteUrl}</div>
         `;
-
-        // Add close button functionality is now handled by the main event listener
 
         // Position popover near the clicked emote
         const rect = emoteImg.getBoundingClientRect();
@@ -466,21 +477,25 @@ fn get_chat_html_template() -> &'static str {
 
         popover.style.left = left + 'px';
         popover.style.top = top + 'px';
+        popover.style.zIndex = '99999';
 
         document.body.appendChild(popover);
         currentPopover = popover;
 
-        console.log('Popover added to DOM');
+        // Prevent scroll when popover is open
+        chatContainer.style.overflowY = 'hidden';
       }
 
       function hideEmotePopover() {
         if (currentPopover) {
-          console.log('Hiding popover');
           // Remove all child event listeners by cloning
           const newPopover = currentPopover.cloneNode(false);
           currentPopover.parentNode.replaceChild(newPopover, currentPopover);
           document.body.removeChild(newPopover);
           currentPopover = null;
+
+          // Restore scroll
+          chatContainer.style.overflowY = 'auto';
         }
       }
     </script>
@@ -1008,10 +1023,12 @@ fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
 
 fn build_ui(app: &Application) {
     // Create a shared WebContext to limit process creation and resource usage
+    // This becomes the default context for all WebViews in this process
     let web_context = webkit6::WebContext::new();
     web_context.set_automation_allowed(false);
-    web_context.set_cache_model(webkit6::CacheModel::DocumentViewer);
+    web_context.set_cache_model(webkit6::CacheModel::WebBrowser);
     web_context.set_spell_checking_enabled(false);
+    println!("WebKit HTTP cache enabled with WebBrowser model for emote caching");
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -1559,9 +1576,8 @@ fn create_new_tab(
     entry_box.append(&connect_button);
 
     // Create WebView for chat display
+    // WebViews automatically use the shared WebContext created in build_ui()
     let webview = WebView::new();
-    // Note: WebKitGTK doesn't provide a direct way to set context on individual views
-    // The shared context will be used automatically when creating WebViews in the same process
     webview.set_vexpand(true);
     webview.set_hexpand(true);
 
