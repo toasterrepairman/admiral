@@ -6,30 +6,28 @@ use adw::{Application, ApplicationWindow, HeaderBar, TabBar, TabView, TabPage, T
 use gtk::{gdk, ScrolledWindow, Button, Entry, Button as GtkButton, Orientation, Box, Align, Stack, ListBoxRow, Popover};
 use webkit6::WebView;
 use webkit6::prelude::WebViewExt;
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicBool, Ordering}};
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use twitch_irc::login::StaticLoginCredentials;
 use glib::clone;
-use adw::gio::SimpleAction; // Use gio from adw to match versions
+use adw::gio::SimpleAction;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::mpsc;
 use std::thread;
 use tokio::runtime::Runtime;
-use glib::source::idle_add_local;
-use glib::ControlFlow;
 use serde::Deserialize;
 use serde::Serialize;
-use shellexpand; // For path expansion
-use std::fs; // For file operations
-use std::path::Path; // For path handling
-use std::io::{Read, Write}; // For reading/writing files
-use toml; // For TOML serialization
-use rlimit::{Resource};
-use std::time::Instant;
+use shellexpand;
+use std::fs;
+use std::path::Path;
+use std::io::Read;
+use toml;
+use rlimit;
+use std::time::{Instant, Duration};
 
-mod auth; // Assuming these modules exist
-mod emotes; // Assuming these modules exist
-use crate::emotes::{MESSAGE_CSS, get_emote_map, parse_message_html, cleanup_emote_cache, cleanup_media_file_cache}; // Updated import
+mod auth;
+mod emotes;
+use crate::emotes::{MESSAGE_CSS, get_emote_map, parse_message_html, cleanup_emote_cache, cleanup_media_file_cache};
 
 // Connection state management
 #[derive(Debug, Clone)]
@@ -527,6 +525,7 @@ struct ClientState {
     runtime: Option<Runtime>,
     join_handle: Option<thread::JoinHandle<()>>,
     paused: bool, // Track if this tab's message processing is paused
+    shutdown_flag: Arc<AtomicBool>, // Flag to signal graceful shutdown
 }
 
 impl ClientState {
@@ -536,13 +535,27 @@ impl ClientState {
             runtime: Some(Runtime::new().unwrap()),
             join_handle: None,
             paused: false, // Start unpaused
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
     }
     fn disconnect(&mut self) {
         self.client = None;
+        self.shutdown_flag.store(true, Ordering::SeqCst);
         if let Some(handle) = self.join_handle.take() {
-            handle.join().unwrap_or(());
+            let timeout = Duration::from_millis(500);
+            if !handle.is_finished() {
+                let thread = thread::current();
+                thread.unpark();
+                // Wait with timeout to prevent blocking indefinitely
+                let start = Instant::now();
+                while start.elapsed() < timeout && !handle.is_finished() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            // Thread may have finished or timed out, drop the handle
+            drop(handle);
         }
+        self.shutdown_flag.store(false, Ordering::SeqCst);
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new().unwrap());
         }
@@ -571,6 +584,7 @@ struct TabData {
     error_tx: std::sync::mpsc::Sender<()>,
     error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
     last_js_execution: Arc<Mutex<Instant>>,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 
@@ -695,7 +709,7 @@ fn validate_hex_color(color: &str) -> bool {
 }
 
 fn apply_background_color_to_tabs(
-    tab_view: &TabView,
+    _tab_view: &TabView,
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
     color: Option<&str>,
 ) {
@@ -981,6 +995,11 @@ fn cleanup_webview(webview: &WebView) {
         if (typeof scrollTimeout !== 'undefined') {
             clearTimeout(scrollTimeout);
         }
+
+        // Stop the keepRendering loop
+        if (typeof frameCount !== 'undefined') {
+            frameCount = Infinity;
+        }
     "#;
 
     webview.evaluate_javascript(
@@ -990,9 +1009,17 @@ fn cleanup_webview(webview: &WebView) {
         None::<&adw::gio::Cancellable>,
         |_| {},
     );
+}
 
-    // Small delay to allow cleanup to complete
-    std::thread::sleep(std::time::Duration::from_millis(50));
+fn cleanup_all_webviews(tabs: &HashMap<String, Arc<TabData>>) {
+    println!("Cleaning up all WebViews");
+    for (tab_id, tab_data) in tabs.iter() {
+        println!("Cleaning up WebView for tab: {}", tab_id);
+        cleanup_webview(&tab_data.webview);
+        // Load blank page to force cleanup
+        tab_data.webview.load_uri("about:blank");
+    }
+    println!("All WebViews cleaned up");
 }
 
 fn disconnect_tab_handler(tab_data: &Arc<TabData>) {
@@ -1521,6 +1548,9 @@ fn build_ui(app: &Application) {
     quit_action.connect_activate(move |_, _| {
         println!("Quit action triggered");
         let tabs_map = tabs_quit.lock().unwrap();
+        // First cleanup all WebViews
+        cleanup_all_webviews(&tabs_map);
+        // Then disconnect all tabs
         for (tab_id, tab_data) in tabs_map.iter() {
             println!("Disconnecting tab: {}", tab_id);
             disconnect_tab_handler(tab_data);
@@ -1539,6 +1569,9 @@ fn build_ui(app: &Application) {
     window.connect_close_request(move |_window| {
         println!("Window close button clicked");
         let tabs_map = tabs_for_window_close.lock().unwrap();
+        // First cleanup all WebViews
+        cleanup_all_webviews(&tabs_map);
+        // Then disconnect all tabs
         for (tab_id, tab_data) in tabs_map.iter() {
             println!("Disconnecting tab on window close: {}", tab_id);
             disconnect_tab_handler(tab_data);
@@ -1556,7 +1589,7 @@ fn create_new_tab(
     label: &str,
     tab_view: &TabView,
     tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
-    web_context: &webkit6::WebContext
+    _web_context: &webkit6::WebContext
 ) {
     let tab_content = Box::new(Orientation::Vertical, 0);
 
@@ -1693,19 +1726,22 @@ fn create_new_tab(
         .unwrap()
         .as_millis();
     let tab_id = format!("tab_{}_{}", timestamp, tab_count);
+    let client_state = Arc::new(Mutex::new(ClientState::new()));
+    let shutdown_flag = client_state.lock().unwrap().shutdown_flag.clone();
     let tab_data = TabData {
         page: page.clone(),
         webview: webview.clone(),
         stack: stack.clone(),
         entry: entry.clone(),
         channel_name: Arc::new(Mutex::new(None)),
-        client_state: Arc::new(Mutex::new(ClientState::new())),
+        client_state: client_state.clone(),
         connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
         tx,
         rx: Arc::new(Mutex::new(rx)),
         error_tx,
         error_rx: Arc::new(Mutex::new(error_rx)),
         last_js_execution: Arc::new(Mutex::new(Instant::now())),
+        shutdown_flag,
     };
     let tab_data_arc = Arc::new(tab_data);
     tabs.lock().unwrap().insert(tab_id.clone(), tab_data_arc.clone());
@@ -1797,7 +1833,7 @@ fn start_connection_for_tab(
                 *state = ConnectionState::Connected(channel.clone());
             }
 
-            // Message reception loop with pause support
+            // Message reception loop with pause support and graceful shutdown
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
                     // Check if this tab is paused (inactive)
@@ -1805,6 +1841,17 @@ fn start_connection_for_tab(
                         let state = client_state_thread.lock().unwrap();
                         state.paused
                     };
+
+                    // Check shutdown flag
+                    let should_shutdown = {
+                        let state = client_state_thread.lock().unwrap();
+                        state.shutdown_flag.load(Ordering::SeqCst)
+                    };
+
+                    if should_shutdown {
+                        println!("Shutdown flag set, exiting message loop");
+                        break;
+                    }
 
                     // Only send messages to UI thread if not paused
                     if !is_paused {
