@@ -1444,29 +1444,100 @@ fn build_ui(app: &Application) {
     // This is needed on Linux when switching virtual desktops - the webview would otherwise
     // stop rendering and blank out until you return
     let tabs_keepalive = tabs.clone();
-    let tab_view_keepalive = tab_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
-        // Only keep-alive the active tab to reduce CPU usage
-        if let Some(selected_page) = tab_view_keepalive.selected_page() {
-            let tabs_map = tabs_keepalive.lock().unwrap();
-            for (_, tab_data) in tabs_map.iter() {
-                if tab_data.page == selected_page {
-                    // Evaluate a no-op JavaScript to keep the webview context alive
-                    // This forces WebKit to maintain the rendering state even when unmapped
-                    let webview = tab_data.webview.clone();
-                    webview.evaluate_javascript(
-                        "if(document.body) { document.body.offsetHeight; void 0; }",
-                        None,
-                        None,
-                        None::<&adw::gio::Cancellable>,
-                        |_| {},
-                    );
-                    break; // Only process the active tab
+    glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
+        // Keep-alive ALL tabs to ensure they stay alive when window is on another desktop
+        let tabs_map = tabs_keepalive.lock().unwrap();
+        for (_, tab_data) in tabs_map.iter() {
+            let webview = tab_data.webview.clone();
+
+            // More aggressive keep-alive: force reflow and repaint
+            webview.evaluate_javascript(
+                r#"
+                if (document.body) {
+                    // Force reflow by accessing layout properties
+                    const height = document.body.offsetHeight;
+                    const width = document.body.offsetWidth;
+                    
+                    // Force repaint by toggling a minimal style change
+                    const container = document.getElementById('chat-container');
+                    if (container) {
+                        const currentOpacity = container.style.opacity;
+                        container.style.opacity = currentOpacity === '0.9999' ? '1' : '0.9999';
+                    }
+                    
+                    // Touch scroll position to keep renderer awake
+                    const scrollContainer = document.getElementById('chat-container');
+                    if (scrollContainer) {
+                        const scrollTop = scrollContainer.scrollTop;
+                        scrollContainer.scrollTop = scrollTop;
+                    }
+                    
+                    void 0;
                 }
+                "#,
+                None,
+                None,
+                None::<&adw::gio::Cancellable>,
+                |_| {},
+            );
+        }
+        drop(tabs_map);
+        glib::ControlFlow::Continue
+    });
+
+    // Window visibility tracking for more aggressive keep-alive when on another desktop
+    let window_for_visibility = window.clone();
+    let tabs_for_visibility = tabs.clone();
+    window.connect_is_active_notify(move |win| {
+        let is_active = win.is_active();
+        println!("Window active state changed: {}", is_active);
+        
+        if !is_active {
+            // Window moved to another desktop or lost focus - trigger immediate refresh
+            let tabs_map = tabs_for_visibility.lock().unwrap();
+            for (_, tab_data) in tabs_map.iter() {
+                let webview = tab_data.webview.clone();
+                webview.evaluate_javascript(
+                    r#"
+                    // Force immediate repaint by triggering style change
+                    if (document.body) {
+                        document.body.style.backgroundColor = 'rgba(0,0,0,0.94)';
+                        requestAnimationFrame(() => {
+                            document.body.style.backgroundColor = '';
+                        });
+                    }
+                    "#,
+                    None,
+                    None,
+                    None::<&adw::gio::Cancellable>,
+                    |_| {},
+                );
+            }
+            drop(tabs_map);
+        } else {
+            // Window became active again - ensure everything is properly rendered
+            let tabs_map = tabs_for_visibility.lock().unwrap();
+            for (_, tab_data) in tabs_map.iter() {
+                let webview = tab_data.webview.clone();
+                webview.evaluate_javascript(
+                    r#"
+                    // Force full refresh when window becomes active
+                    if (document.body) {
+                        const container = document.getElementById('chat-container');
+                        if (container) {
+                            // Force scroll to bottom to ensure render
+                            container.scrollTop = container.scrollHeight;
+                        }
+                    }
+                    "#,
+                    None,
+                    None,
+                    None::<&adw::gio::Cancellable>,
+                    |_| {},
+                );
             }
             drop(tabs_map);
         }
-        glib::ControlFlow::Continue
     });
 
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
