@@ -1717,7 +1717,7 @@ fn create_new_tab(
     settings.set_enable_caret_browsing(false);
     settings.set_enable_html5_database(false);
     settings.set_enable_html5_local_storage(false);
-    settings.set_enable_webaudio(false);
+    settings.set_enable_webaudio(true);
     settings.set_enable_hyperlink_auditing(false);
     settings.set_print_backgrounds(true);
     settings.set_enable_spatial_navigation(false);
@@ -1751,6 +1751,44 @@ fn create_new_tab(
     // Inject initial HTML and JavaScript with custom background color
     let html_template = get_chat_html_template_with_color(get_background_color().as_deref());
     webview.load_html(&html_template, None);
+
+    // Keep WebView alive by creating a silent audio context (prevents process suspension)
+    // Run after page load to ensure it executes properly
+    webview.connect_load_changed(clone!(
+        #[strong]
+        webview,
+        move |webview, event| {
+            use webkit6::LoadEvent;
+            if event == LoadEvent::Finished {
+            let audio_script = r#"
+                (() => {
+                    console.log('Creating silent audio context to prevent suspension...');
+                    try {
+                        const ctx = new AudioContext();
+                        const oscillator = ctx.createOscillator();
+                        const gain = ctx.createGain();
+                        gain.gain.value = 0;
+                        oscillator.connect(gain);
+                        gain.connect(ctx.destination);
+                        oscillator.start();
+                        console.log('Audio context created successfully, state:', ctx.state);
+                    } catch (e) {
+                        console.error('Failed to create audio context:', e);
+                    }
+                })();
+            "#;
+            webview.evaluate_javascript(
+                audio_script,
+                None,
+                None,
+                None::<&adw::gio::Cancellable>,
+                |result| {
+                if let Err(e) = result {
+                    eprintln!("Failed to initialize audio context: {:?}", e);
+                }
+            });
+        }
+    }));
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
