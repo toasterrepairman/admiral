@@ -524,7 +524,6 @@ struct ClientState {
     client: Option<TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>>,
     runtime: Option<Runtime>,
     join_handle: Option<thread::JoinHandle<()>>,
-    paused: bool, // Track if this tab's message processing is paused
     shutdown_flag: Arc<AtomicBool>, // Flag to signal graceful shutdown
 }
 
@@ -534,7 +533,6 @@ impl ClientState {
             client: None,
             runtime: Some(Runtime::new().unwrap()),
             join_handle: None,
-            paused: false, // Start unpaused
             shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -559,7 +557,6 @@ impl ClientState {
         if self.runtime.is_none() {
             self.runtime = Some(Runtime::new().unwrap());
         }
-        self.paused = false; // Reset pause state on disconnect
     }
 }
 
@@ -1290,34 +1287,11 @@ fn build_ui(app: &Application) {
             let tabs_map = tabs_for_selection.lock().unwrap();
             for (_, tab_data) in tabs_map.iter() {
                 let is_active_tab = tab_data.page == selected_page;
-
                 if is_active_tab {
-                    // Resume the active tab
                     let mut client_state = tab_data.client_state.lock().unwrap();
-                    if client_state.paused {
-                        client_state.paused = false;
-                        println!("Resuming message processing for active tab");
-                    }
+                    // Just log for debugging, don't pause
+                    println!("Processing active tab");
                     drop(client_state);
-                } else {
-                    // Pause the inactive tab and drain its queue
-                    let mut client_state = tab_data.client_state.lock().unwrap();
-                    if !client_state.paused {
-                        client_state.paused = true;
-                        println!("Pausing message processing for inactive tab");
-                    }
-                    drop(client_state);
-
-                    // Drain the entire queue for the inactive tab (no limit)
-                    let rx = tab_data.rx.lock().unwrap();
-                    let mut drained = 0;
-                    while let Ok(_) = rx.try_recv() {
-                        drained += 1;
-                    }
-                    if drained > 0 {
-                        println!("Drained {} queued messages from inactive channel", drained);
-                    }
-                    drop(rx);
                 }
             }
         }
@@ -1440,38 +1414,29 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
-    // Keep-alive timer to prevent webviews from going dormant when window is inactive
-    // This is needed on Linux when switching virtual desktops - the webview would otherwise
-    // stop rendering and blank out until you return
+    // Keep-alive timer disabled - causes freezes when window loses focus.
+    // Audio context should keep WebView alive. If needed, re-enable with lower frequency.
+    /*
     let tabs_keepalive = tabs.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
-        // Keep-alive ALL tabs to ensure they stay alive when window is on another desktop
         let tabs_map = tabs_keepalive.lock().unwrap();
         for (_, tab_data) in tabs_map.iter() {
             let webview = tab_data.webview.clone();
-
-            // More aggressive keep-alive: force reflow and repaint
             webview.evaluate_javascript(
                 r#"
                 if (document.body) {
-                    // Force reflow by accessing layout properties
                     const height = document.body.offsetHeight;
                     const width = document.body.offsetWidth;
-                    
-                    // Force repaint by toggling a minimal style change
                     const container = document.getElementById('chat-container');
                     if (container) {
                         const currentOpacity = container.style.opacity;
                         container.style.opacity = currentOpacity === '0.9999' ? '1' : '0.9999';
                     }
-                    
-                    // Touch scroll position to keep renderer awake
                     const scrollContainer = document.getElementById('chat-container');
                     if (scrollContainer) {
                         const scrollTop = scrollContainer.scrollTop;
                         scrollContainer.scrollTop = scrollTop;
                     }
-                    
                     void 0;
                 }
                 "#,
@@ -1484,61 +1449,7 @@ fn build_ui(app: &Application) {
         drop(tabs_map);
         glib::ControlFlow::Continue
     });
-
-    // Window visibility tracking for more aggressive keep-alive when on another desktop
-    let window_for_visibility = window.clone();
-    let tabs_for_visibility = tabs.clone();
-    window.connect_is_active_notify(move |win| {
-        let is_active = win.is_active();
-        println!("Window active state changed: {}", is_active);
-        
-        if !is_active {
-            // Window moved to another desktop or lost focus - trigger immediate refresh
-            let tabs_map = tabs_for_visibility.lock().unwrap();
-            for (_, tab_data) in tabs_map.iter() {
-                let webview = tab_data.webview.clone();
-                webview.evaluate_javascript(
-                    r#"
-                    // Force immediate repaint by triggering style change
-                    if (document.body) {
-                        document.body.style.backgroundColor = 'rgba(0,0,0,0.94)';
-                        requestAnimationFrame(() => {
-                            document.body.style.backgroundColor = '';
-                        });
-                    }
-                    "#,
-                    None,
-                    None,
-                    None::<&adw::gio::Cancellable>,
-                    |_| {},
-                );
-            }
-            drop(tabs_map);
-        } else {
-            // Window became active again - ensure everything is properly rendered
-            let tabs_map = tabs_for_visibility.lock().unwrap();
-            for (_, tab_data) in tabs_map.iter() {
-                let webview = tab_data.webview.clone();
-                webview.evaluate_javascript(
-                    r#"
-                    // Force full refresh when window becomes active
-                    if (document.body) {
-                        const container = document.getElementById('chat-container');
-                        if (container) {
-                            // Force scroll to bottom to ensure render
-                            container.scrollTop = container.scrollHeight;
-                        }
-                    }
-                    "#,
-                    None,
-                    None,
-                    None::<&adw::gio::Cancellable>,
-                    |_| {},
-                );
-            }
-            drop(tabs_map);
-        }
-    });
+    */
 
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
@@ -1680,7 +1591,7 @@ fn create_new_tab(
     entry_box.append(&connect_button);
 
     // Create WebView for chat display
-    // WebViews automatically use the shared WebContext created in build_ui()
+    // Note: Visibility override will be injected via JS after load
     let webview = WebView::new();
     webview.set_vexpand(true);
     webview.set_hexpand(true);
@@ -1753,6 +1664,7 @@ fn create_new_tab(
     webview.load_html(&html_template, None);
 
     // Keep WebView alive by creating a silent audio context (prevents process suspension)
+    // Also override page visibility to prevent WebKit from throttling when window is not focused
     // Run after page load to ensure it executes properly
     webview.connect_load_changed(clone!(
         #[strong]
@@ -1775,6 +1687,20 @@ fn create_new_tab(
                     } catch (e) {
                         console.error('Failed to create audio context:', e);
                     }
+
+                    // Override page visibility to prevent WebKit throttling
+                    Object.defineProperty(document, 'visibilityState', {
+                        get: function() { return 'visible'; },
+                        configurable: true
+                    });
+                    Object.defineProperty(document, 'hidden', {
+                        get: function() { return false; },
+                        configurable: true
+                    });
+                    document.addEventListener('visibilitychange', function(e) {
+                        e.stopImmediatePropagation();
+                    }, true);
+                    console.log('Page visibility override applied');
                 })();
             "#;
             webview.evaluate_javascript(
@@ -1826,7 +1752,7 @@ fn create_new_tab(
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    let (tx, rx) = mpsc::sync_channel(50); // Reduced capacity - inactive tabs are paused, so we need less buffer
+    let (tx, rx) = mpsc::sync_channel(200); // Larger buffer since all tabs are active
     let (error_tx, error_rx) = mpsc::channel();
 
     let tab_count = tabs.lock().unwrap().len();
@@ -1942,15 +1868,9 @@ fn start_connection_for_tab(
                 *state = ConnectionState::Connected(channel.clone());
             }
 
-            // Message reception loop with pause support and graceful shutdown
+            // Message reception loop - process all tabs regardless of activity
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    // Check if this tab is paused (inactive)
-                    let is_paused = {
-                        let state = client_state_thread.lock().unwrap();
-                        state.paused
-                    };
-
                     // Check shutdown flag
                     let should_shutdown = {
                         let state = client_state_thread.lock().unwrap();
@@ -1962,39 +1882,32 @@ fn start_connection_for_tab(
                         break;
                     }
 
-                    // Only send messages to UI thread if not paused
-                    if !is_paused {
-                        // Try to send with timeout to prevent blocking indefinitely
-                        // If UI thread can't keep up, we'll drop the message
-                        let send_result = tx.try_send(msg.clone());
+                    // Always send messages to UI thread (no pausing)
+                    let send_result = tx.try_send(msg.clone());
 
-                        match send_result {
-                            Ok(_) => {},
-                            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                // Channel is full - UI thread is overwhelmed
-                                // Drop the message to prevent IRC thread from blocking
-                                use std::time::{SystemTime, UNIX_EPOCH};
-                                let now = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs();
+                    match send_result {
+                        Ok(_) => {},
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                            // Channel is full - UI thread is overwhelmed
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
 
-                                // Use atomic to track last warning time globally
-                                static LAST_WARNING: AtomicU64 = AtomicU64::new(0);
-                                let last_warning = LAST_WARNING.load(Ordering::Relaxed);
+                            static LAST_WARNING: AtomicU64 = AtomicU64::new(0);
+                            let last_warning = LAST_WARNING.load(Ordering::Relaxed);
 
-                                if now.saturating_sub(last_warning) >= 5 {
-                                    eprintln!("UI thread message queue full, dropping messages to prevent freeze");
-                                    LAST_WARNING.store(now, Ordering::Relaxed);
-                                }
-                            }
-                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                eprintln!("UI thread disconnected, stopping message processing");
-                                break;
+                            if now.saturating_sub(last_warning) >= 5 {
+                                eprintln!("UI thread message queue full, dropping messages to prevent freeze");
+                                LAST_WARNING.store(now, Ordering::Relaxed);
                             }
                         }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            eprintln!("UI thread disconnected, stopping message processing");
+                            break;
+                        }
                     }
-                    // If paused, silently drop the message to prevent queue buildup
                 }
             }
 
