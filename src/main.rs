@@ -118,11 +118,16 @@ fn get_chat_html_template() -> &'static str {
         .message-content img:hover {
             transform: scale(1.1);
         }
+        :root {
+            --popover-bg: rgba(30, 30, 30, 0.95);
+            --popover-border: rgba(255, 255, 255, 0.2);
+            --popover-text: rgba(255, 255, 255, 0.6);
+        }
         /* Emote popover styles */
         .emote-popover {
             position: fixed;
-            background-color: rgba(30, 30, 30, 0.95);
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            background-color: var(--popover-bg);
+            border: 1px solid var(--popover-border);
             border-radius: 8px;
             padding: 12px;
             z-index: 10000;
@@ -138,7 +143,7 @@ fn get_chat_html_template() -> &'static str {
             margin: 0 auto 8px;
             object-fit: contain;
             border-radius: 4px;
-            background-color: rgba(255, 255, 255, 0.1);
+            background-color: rgba(128, 128, 128, 0.1);
             padding: 4px;
         }
         .emote-popover-name {
@@ -149,7 +154,7 @@ fn get_chat_html_template() -> &'static str {
         }
         .emote-popover-url {
             font-size: 10px;
-            color: rgba(255, 255, 255, 0.6);
+            color: var(--popover-text);
             text-align: center;
             word-break: break-all;
             font-family: monospace;
@@ -160,7 +165,7 @@ fn get_chat_html_template() -> &'static str {
             right: 4px;
             background: none;
             border: none;
-            color: rgba(255, 255, 255, 0.6);
+            color: var(--popover-text);
             cursor: pointer;
             font-size: 16px;
             width: 20px;
@@ -171,8 +176,8 @@ fn get_chat_html_template() -> &'static str {
             justify-content: center;
         }
         .emote-popover-close:hover {
-            background-color: rgba(255, 255, 255, 0.1);
-            color: rgba(255, 255, 255, 0.9);
+            background-color: rgba(128, 128, 128, 0.2);
+            color: inherit;
         }
         /* Buffer element for maintaining scroll position */
         .scroll-buffer {
@@ -784,6 +789,59 @@ fn apply_background_color_to_tabs(
     }
 }
 
+fn get_theme_popover_colors(widget: &impl gtk::prelude::WidgetExt) -> (String, String, String) {
+    let color = widget.color();
+    let bg = widget.style_context().lookup_color("window_bg_color")
+        .unwrap_or_else(|| gdk::RGBA::new(0.118, 0.118, 0.118, 1.0));
+    let luminance = bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114;
+    let is_dark = luminance < 0.5;
+
+    let popover_bg = format!("rgba({}, {}, {}, 0.95)",
+        (bg.red() * 255.0) as u8,
+        (bg.green() * 255.0) as u8,
+        (bg.blue() * 255.0) as u8,
+    );
+    let border_alpha = if is_dark { 0.2 } else { 0.15 };
+    let popover_border = format!("rgba({}, {}, {}, {})",
+        (color.red() * 255.0) as u8,
+        (color.green() * 255.0) as u8,
+        (color.blue() * 255.0) as u8,
+        border_alpha,
+    );
+    let text_alpha = if is_dark { 0.6 } else { 0.55 };
+    let popover_text = format!("rgba({}, {}, {}, {})",
+        (color.red() * 255.0) as u8,
+        (color.green() * 255.0) as u8,
+        (color.blue() * 255.0) as u8,
+        text_alpha,
+    );
+
+    (popover_bg, popover_border, popover_text)
+}
+
+fn apply_theme_to_popovers(
+    tabs: &Arc<Mutex<HashMap<String, Arc<TabData>>>>,
+    widget: &impl gtk::prelude::WidgetExt,
+) {
+    let (popover_bg, popover_border, popover_text) = get_theme_popover_colors(widget);
+    let tabs_map = tabs.lock().unwrap();
+    for (_, tab_data) in tabs_map.iter() {
+        let js = format!(
+            "document.documentElement.style.setProperty('--popover-bg', '{}');\
+             document.documentElement.style.setProperty('--popover-border', '{}');\
+             document.documentElement.style.setProperty('--popover-text', '{}');",
+            popover_bg, popover_border, popover_text,
+        );
+        tab_data.webview.evaluate_javascript(
+            &js,
+            None,
+            None,
+            None::<&adw::gio::Cancellable>,
+            |_| {},
+        );
+    }
+}
+
 fn load_and_display_favorites(
     list: &gtk::ListBox, // Use fully qualified name to avoid ambiguity
     favorites_entry: &Entry,
@@ -1278,6 +1336,14 @@ fn build_ui(app: &Application) {
         apply_background_color_to_tabs(&tab_view, &tabs, Some(&color));
     }
 
+    // Apply GTK theme colors to emote popovers and listen for theme changes
+    apply_theme_to_popovers(&tabs, &window);
+    let tabs_for_theme = tabs.clone();
+    let window_for_theme = window.clone();
+    adw::StyleManager::default().connect_color_scheme_notify(move |_| {
+        apply_theme_to_popovers(&tabs_for_theme, &window_for_theme);
+    });
+
     // Pause/resume IRC connections and clear queues when switching tabs
     let tabs_for_selection = tabs.clone();
     let tab_view_for_selection = tab_view.clone();
@@ -1669,9 +1735,28 @@ fn create_new_tab(
     webview.connect_load_changed(clone!(
         #[strong]
         webview,
+        #[strong]
+        tab_content,
         move |webview, event| {
             use webkit6::LoadEvent;
             if event == LoadEvent::Finished {
+            let (popover_bg, popover_border, popover_text) = get_theme_popover_colors(&tab_content);
+            let theme_js = format!(
+                "document.documentElement.style.setProperty('--popover-bg', '{}');\
+                 document.documentElement.style.setProperty('--popover-border', '{}');\
+                 document.documentElement.style.setProperty('--popover-text', '{}');",
+                popover_bg, popover_border, popover_text,
+            );
+            webview.evaluate_javascript(
+                &theme_js,
+                None,
+                None,
+                None::<&adw::gio::Cancellable>,
+                |result| {
+                if let Err(e) = result {
+                    eprintln!("Failed to apply theme popover colors: {:?}", e);
+                }
+            });
             let audio_script = r#"
                 (() => {
                     console.log('Creating silent audio context to prevent suspension...');
