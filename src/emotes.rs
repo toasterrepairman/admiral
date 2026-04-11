@@ -559,7 +559,7 @@ pub fn parse_message_html(
         for (name, url) in overlays {
             let emote_name_escaped = glib::markup_escape_text(name);
             let url_escaped = glib::markup_escape_text(url);
-            html.push_str(r#"<img class="emote-overlay" width="28" height="28" src=""#);
+            html.push_str(r#"<img class="emote-overlay" height="28" src=""#);
             html.push_str(&url_escaped);
             html.push_str(r#"" alt=":"#);
             html.push_str(&emote_name_escaped);

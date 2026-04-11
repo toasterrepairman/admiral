@@ -119,23 +119,21 @@ fn get_chat_html_template() -> &'static str {
             transform: scale(1.1);
         }
         .emote-stack {
-            position: relative;
-            display: inline-block;
-            width: 28px;
-            height: 28px;
+            display: inline-grid;
             vertical-align: middle;
             margin: 0 2px;
         }
-        .emote-stack > img:first-child {
-            width: 28px;
+        .emote-stack > * {
+            grid-area: 1 / 1;
+            justify-self: center;
+            align-self: center;
+        }
+        .emote-stack > img {
             height: 28px;
+            width: auto;
+            max-width: none;
         }
         .emote-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
             pointer-events: none;
         }
         :root {
