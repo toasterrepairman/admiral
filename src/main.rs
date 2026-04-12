@@ -12,6 +12,7 @@ use twitch_irc::login::StaticLoginCredentials;
 use glib::clone;
 use adw::gio::SimpleAction;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::thread;
 use tokio::runtime::Runtime;
@@ -256,6 +257,10 @@ fn get_chat_html_template() -> &'static str {
       };
       chatContainer.addEventListener('scroll', scrollEventHandler);
 
+      Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+      Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+      document.addEventListener('visibilitychange', (e) => e.stopImmediatePropagation(), true);
+
       function maintainScrollPosition() {
         const currentScrollHeight = chatContainer.scrollHeight;
         const heightDiff = currentScrollHeight - lastScrollHeight;
@@ -360,19 +365,6 @@ fn get_chat_html_template() -> &'static str {
         chatContainer.scrollTop = chatContainer.scrollHeight;
         lastScrollHeight = chatContainer.scrollHeight;
         setupEmotePopovers();
-
-        // Keep rendering active to prevent tab unloading on desktop switch
-        let frameCount = 0;
-        function keepRendering() {
-          frameCount++;
-          if (frameCount % 60 === 0) {
-            // Force a minimal repaint every ~1 second (at 60fps)
-            chatContainer.style.opacity = '0.9999';
-            chatContainer.style.opacity = '1';
-          }
-          requestAnimationFrame(keepRendering);
-        }
-        keepRendering();
       };
 
       // Emote popover functionality
@@ -605,6 +597,7 @@ struct TabData {
     error_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
     last_js_execution: Arc<Mutex<Instant>>,
     shutdown_flag: Arc<AtomicBool>,
+    message_buffer: Arc<Mutex<VecDeque<String>>>,
 }
 
 
@@ -637,7 +630,7 @@ fn main() {
     std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "0");
     std::env::set_var("WEBKIT_NO_TIMEOUT", "1");
     std::env::set_var("WEBKIT_USE_SYSTEM_MALLOC", "0");
-    std::env::set_var("WEBKIT_DISABLE_PAGE_CACHE", "0");
+    std::env::set_var("WEBKIT_DISABLE_PAGE_CACHE", "1");
     app.connect_activate(build_ui);
     app.run();
 }
@@ -1436,6 +1429,7 @@ fn build_ui(app: &Application) {
 
                     if !messages_to_process.is_empty() {
                         let webview = tab_data.webview.clone();
+                        let message_buffer = tab_data.message_buffer.clone();
                         let channel_id_for_closure = messages_to_process
                             .first()
                             .map(|msg| msg.channel_id.clone());
@@ -1445,7 +1439,15 @@ fn build_ui(app: &Application) {
                             let emote_map = get_emote_map(&channel_id_str);
                             let mut html_content = String::new();
                             for msg in &messages_to_process {
-                                html_content.push_str(&parse_message_html(msg, &emote_map));
+                                let msg_html = parse_message_html(msg, &emote_map);
+                                {
+                                    let mut buf = message_buffer.lock().unwrap();
+                                    buf.push_back(msg_html.clone());
+                                    if buf.len() > 500 {
+                                        buf.pop_front();
+                                    }
+                                }
+                                html_content.push_str(&msg_html);
                                 html_content.push('\n');
                             }
 
@@ -1658,6 +1660,7 @@ fn create_new_tab(
     _web_context: &webkit6::WebContext
 ) {
     let tab_content = Box::new(Orientation::Vertical, 0);
+    let message_buffer: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
 
     let entry_box = Box::new(Orientation::Horizontal, 6);
     entry_box.set_margin_top(6);
@@ -1700,10 +1703,9 @@ fn create_new_tab(
     let settings = webkit6::Settings::new();
     settings.set_enable_write_console_messages_to_stdout(true);
     settings.set_javascript_can_open_windows_automatically(false);
-    settings.set_enable_page_cache(true);
+    settings.set_enable_page_cache(false);
     settings.set_enable_webgl(false);
     settings.set_enable_smooth_scrolling(false);
-    settings.set_enable_media_stream(true);
     settings.set_enable_dns_prefetching(true);
     settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
     settings.set_enable_media(true);
@@ -1712,7 +1714,6 @@ fn create_new_tab(
     settings.set_enable_caret_browsing(false);
     settings.set_enable_html5_database(false);
     settings.set_enable_html5_local_storage(false);
-    settings.set_enable_webaudio(true);
     settings.set_enable_hyperlink_auditing(false);
     settings.set_print_backgrounds(true);
     settings.set_enable_spatial_navigation(false);
@@ -1755,6 +1756,8 @@ fn create_new_tab(
         webview,
         #[strong]
         tab_content,
+        #[strong]
+        message_buffer,
         move |webview, event| {
             use webkit6::LoadEvent;
             if event == LoadEvent::Finished {
@@ -1775,49 +1778,34 @@ fn create_new_tab(
                     eprintln!("Failed to apply theme popover colors: {:?}", e);
                 }
             });
-            let audio_script = r#"
-                (() => {
-                    console.log('Creating silent audio context to prevent suspension...');
-                    try {
-                        const ctx = new AudioContext();
-                        const oscillator = ctx.createOscillator();
-                        const gain = ctx.createGain();
-                        gain.gain.value = 0;
-                        oscillator.connect(gain);
-                        gain.connect(ctx.destination);
-                        oscillator.start();
-                        console.log('Audio context created successfully, state:', ctx.state);
-                    } catch (e) {
-                        console.error('Failed to create audio context:', e);
-                    }
 
-                    // Override page visibility to prevent WebKit throttling
-                    Object.defineProperty(document, 'visibilityState', {
-                        get: function() { return 'visible'; },
-                        configurable: true
-                    });
-                    Object.defineProperty(document, 'hidden', {
-                        get: function() { return false; },
-                        configurable: true
-                    });
-                    document.addEventListener('visibilitychange', function(e) {
-                        e.stopImmediatePropagation();
-                    }, true);
-                    console.log('Page visibility override applied');
-                })();
-            "#;
-            webview.evaluate_javascript(
-                audio_script,
-                None,
-                None,
-                None::<&adw::gio::Cancellable>,
-                |result| {
-                if let Err(e) = result {
-                    eprintln!("Failed to initialize audio context: {:?}", e);
-                }
-            });
+            let buf = message_buffer.lock().unwrap();
+            if !buf.is_empty() {
+                let all_html: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
+                let escaped_html = all_html
+                    .replace('\\', "\\\\")
+                    .replace('\'', "\\'")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r");
+                let js = format!(
+                    "if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}",
+                    escaped_html
+                );
+                webview.evaluate_javascript(
+                    &js,
+                    None,
+                    None,
+                    None::<&adw::gio::Cancellable>,
+                    |result| {
+                    if let Err(e) = result {
+                        eprintln!("Failed to restore buffered messages: {:?}", e);
+                    }
+                });
+            }
+            drop(buf);
+            }
         }
-    }));
+    ));
 
     let scrolled_window = ScrolledWindow::builder()
         .vexpand(true)
@@ -1880,6 +1868,7 @@ fn create_new_tab(
         error_rx: Arc::new(Mutex::new(error_rx)),
         last_js_execution: Arc::new(Mutex::new(Instant::now())),
         shutdown_flag,
+        message_buffer,
     };
     let tab_data_arc = Arc::new(tab_data);
     tabs.lock().unwrap().insert(tab_id.clone(), tab_data_arc.clone());
