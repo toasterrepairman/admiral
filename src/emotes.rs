@@ -86,7 +86,7 @@ pub static MESSAGE_CSS: &str = "
 ";
 
 // --- Global State for Emote Maps and Fetching ---
-static EMOTE_MAPS: Lazy<RwLock<HashMap<String, HashMap<String, (String, bool)>>>> =
+static EMOTE_MAPS: Lazy<RwLock<HashMap<String, Arc<HashMap<String, (String, bool)>>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static DOWNLOADING_CHANNELS: Lazy<RwLock<HashMap<String, bool>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
@@ -213,22 +213,17 @@ pub fn cleanup_media_file_cache() {
 }
 
 // --- Emote Map Retrieval (Uses Remote URLs) ---
-pub fn get_emote_map(channel_id: &str) -> HashMap<String, (String, bool)> {
-    // Return map of emote_name -> remote_url
-    // Check if map already exists in memory
+pub fn get_emote_map(channel_id: &str) -> Arc<HashMap<String, (String, bool)>> {
     {
         let maps_read = EMOTE_MAPS.read().unwrap();
         if let Some(map) = maps_read.get(channel_id) {
-            return map.clone(); // Return the existing map
+            return Arc::clone(map);
         }
     }
 
-    // If not in memory, trigger background fetch and return empty map for now
-    // The calling function (parse_message_html) will likely call again shortly after fetch completes.
     fetch_missing_emotes(channel_id);
 
-    // Return an empty map if not yet fetched
-    HashMap::new()
+    Arc::new(HashMap::new())
 }
 
 const FETCH_COOLDOWN: Duration = Duration::from_secs(60 * 1); // 1 minute
@@ -275,7 +270,7 @@ fn fetch_missing_emotes(channel_id: &str) -> Option<thread::JoinHandle<()>> {
             Ok(remote_emote_map) => {
                 // Store the fetched map in the global in-memory cache
                 let mut maps_write = EMOTE_MAPS.write().unwrap();
-                maps_write.insert(channel_id_clone.clone(), remote_emote_map);
+                maps_write.insert(channel_id_clone.clone(), Arc::new(remote_emote_map));
             }
             Err(e) => {
                 eprintln!(
@@ -518,7 +513,7 @@ fn rgb_to_hex(color: &RGBColor) -> String {
 // --- Parse Message to HTML (Updated to use remote URLs) ---
 pub fn parse_message_html(
     msg: &PrivmsgMessage,
-    emote_map: &HashMap<String, (String, bool)>,
+    emote_map: &Arc<HashMap<String, (String, bool)>>,
 ) -> String {
     let sender_name_escaped = glib::markup_escape_text(&msg.sender.name);
     let timestamp = msg

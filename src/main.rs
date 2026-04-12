@@ -534,7 +534,20 @@ fn get_chat_html_template_with_color(background_color: Option<&str>) -> String {
     }
 }
 
-// Client state that needs to be shared and controlled
+fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 struct ClientState {
     client: Option<TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>>,
     runtime: Option<Runtime>,
@@ -625,7 +638,6 @@ fn main() {
 
     // Set environment variables to optimize WebKit for chat rendering
     std::env::set_var("WEBKIT_FORCE_MONOSPACE_FONT", "1");
-    std::env::set_var("WEBKIT_USE_SINGLE_WEB_PROCESS", "1");
     std::env::set_var("WEBKIT_FORCE_SANDBOX", "0");
     std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "0");
     std::env::set_var("WEBKIT_NO_TIMEOUT", "1");
@@ -1397,19 +1409,17 @@ fn build_ui(app: &Application) {
 
     let tabs_clone = tabs.clone();
     let tab_view_for_processing = tab_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
         let tabs_map = tabs_clone.lock().unwrap();
 
-        const MAX_BATCH_SIZE: usize = 30; // Conservative batch size for better responsiveness
-        const MAX_DRAIN_PER_TAB: usize = 50; // Limit draining to prevent blocking
+        const MAX_BATCH_SIZE: usize = 30;
+        const MAX_DRAIN_PER_TAB: usize = 50;
 
         if let Some(selected_page) = tab_view_for_processing.selected_page() {
-            // Process messages for ALL tabs, but only display for the active one
             for (_, tab_data) in tabs_map.iter() {
                 let is_active_tab = tab_data.page == selected_page;
 
                 if is_active_tab {
-                    // Throttle JS execution to prevent overwhelming WebView
                     let last_execution = *tab_data.last_js_execution.lock().unwrap();
                     if last_execution.elapsed() < std::time::Duration::from_millis(30) {
                         continue;
@@ -1418,7 +1428,6 @@ fn build_ui(app: &Application) {
                     let mut messages_to_process = Vec::new();
                     let rx = tab_data.rx.lock().unwrap();
 
-                    // Collect messages up to batch size
                     while messages_to_process.len() < MAX_BATCH_SIZE {
                         match rx.try_recv() {
                             Ok(msg) => messages_to_process.push(msg),
@@ -1451,12 +1460,7 @@ fn build_ui(app: &Application) {
                                 html_content.push('\n');
                             }
 
-                            let escaped_html = html_content
-                                .replace('\\', "\\\\")
-                                .replace('\'', "\\'")
-                                .replace('\n', "\\n")
-                                .replace('\r', "\\r");
-
+                            let escaped_html = escape_js_string(&html_content);
                             let js_code = format!(
                                 r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
                                 escaped_html
@@ -1480,10 +1484,19 @@ fn build_ui(app: &Application) {
                             );
                         }
                     }
+                } else {
+                    let rx = tab_data.rx.lock().unwrap();
+                    let mut drained = 0;
+                    while drained < MAX_DRAIN_PER_TAB {
+                        match rx.try_recv() {
+                            Ok(_) => drained += 1,
+                            Err(_) => break,
+                        }
+                    }
+                    drop(rx);
                 }
             }
         } else {
-            // No tab selected - drain all tabs
             for (_, tab_data) in tabs_map.iter() {
                 let rx = tab_data.rx.lock().unwrap();
                 let mut drained = 0;
@@ -1928,6 +1941,7 @@ fn start_connection_for_tab(
     let connection_state = tab_data.connection_state.clone();
     let client_state_thread = tab_data.client_state.clone();
     let client_state_store = tab_data.client_state.clone();
+    let shutdown_flag = tab_data.shutdown_flag.clone();
     let tx = tab_data.tx.clone();
     let error_tx = tab_data.error_tx.clone();
 
@@ -1963,13 +1977,7 @@ fn start_connection_for_tab(
             // Message reception loop - process all tabs regardless of activity
             while let Some(message) = incoming_messages.recv().await {
                 if let twitch_irc::message::ServerMessage::Privmsg(msg) = message {
-                    // Check shutdown flag
-                    let should_shutdown = {
-                        let state = client_state_thread.lock().unwrap();
-                        state.shutdown_flag.load(Ordering::SeqCst)
-                    };
-
-                    if should_shutdown {
+                    if shutdown_flag.load(Ordering::Acquire) {
                         println!("Shutdown flag set, exiting message loop");
                         break;
                     }
