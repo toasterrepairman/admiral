@@ -611,6 +611,7 @@ struct TabData {
     last_js_execution: Arc<Mutex<Instant>>,
     shutdown_flag: Arc<AtomicBool>,
     message_buffer: Arc<Mutex<VecDeque<String>>>,
+    pending_messages: Arc<Mutex<VecDeque<twitch_irc::message::PrivmsgMessage>>>,
 }
 
 
@@ -1367,20 +1368,76 @@ fn build_ui(app: &Application) {
         apply_theme_to_popovers(&tabs_for_theme, &window_for_theme);
     });
 
-    // Pause/resume IRC connections and clear queues when switching tabs
+    // Flush pending messages when switching tabs and check WebView health
     let tabs_for_selection = tabs.clone();
     let tab_view_for_selection = tab_view.clone();
     tab_view.connect_selected_page_notify(move |_| {
-        // When switching tabs, pause inactive tabs and resume the active one
         if let Some(selected_page) = tab_view_for_selection.selected_page() {
             let tabs_map = tabs_for_selection.lock().unwrap();
             for (_, tab_data) in tabs_map.iter() {
-                let is_active_tab = tab_data.page == selected_page;
-                if is_active_tab {
-                    let mut client_state = tab_data.client_state.lock().unwrap();
-                    // Just log for debugging, don't pause
+                if tab_data.page == selected_page {
                     println!("Processing active tab");
-                    drop(client_state);
+
+                    let webview = tab_data.webview.clone();
+                    webview.evaluate_javascript(
+                        "void(0);",
+                        None,
+                        None,
+                        None::<&adw::gio::Cancellable>,
+                        |result| {
+                            if result.is_err() {
+                                eprintln!("WebView health check failed on tab switch - may need reload");
+                            }
+                        },
+                    );
+
+                    let mut pending = tab_data.pending_messages.lock().unwrap();
+                    if !pending.is_empty() {
+                        let channel_id_opt = pending.front().map(|m| m.channel_id.clone());
+                        if let Some(channel_id_str) = channel_id_opt {
+                            let emote_map = get_emote_map(&channel_id_str);
+                            let mut html_content = String::new();
+                            let mut count = 0;
+                            while let Some(msg) = pending.pop_front() {
+                                if count >= 30 { break; }
+                                let msg_html = parse_message_html(&msg, &emote_map);
+                                {
+                                    let mut buf = tab_data.message_buffer.lock().unwrap();
+                                    buf.push_back(msg_html.clone());
+                                    if buf.len() > 500 {
+                                        buf.pop_front();
+                                    }
+                                }
+                                html_content.push_str(&msg_html);
+                                html_content.push('\n');
+                                count += 1;
+                            }
+                            let escaped_html = escape_js_string(&html_content);
+                            let js_code = format!(
+                                r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
+                                escaped_html
+                            );
+                            let webview_flush = tab_data.webview.clone();
+                            let last_js_execution = tab_data.last_js_execution.clone();
+                            webview_flush.evaluate_javascript(
+                                &js_code,
+                                None,
+                                None,
+                                None::<&adw::gio::Cancellable>,
+                                move |result| {
+                                    match result {
+                                        Ok(_) => {
+                                            *last_js_execution.lock().unwrap() = Instant::now();
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Error flushing pending messages: {}", e);
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                    }
+                    drop(pending);
                 }
             }
         }
@@ -1414,6 +1471,7 @@ fn build_ui(app: &Application) {
 
         const MAX_BATCH_SIZE: usize = 30;
         const MAX_DRAIN_PER_TAB: usize = 50;
+        const MAX_PENDING_BUFFER: usize = 500;
 
         if let Some(selected_page) = tab_view_for_processing.selected_page() {
             for (_, tab_data) in tabs_map.iter() {
@@ -1486,26 +1544,42 @@ fn build_ui(app: &Application) {
                     }
                 } else {
                     let rx = tab_data.rx.lock().unwrap();
+                    let mut pending = tab_data.pending_messages.lock().unwrap();
                     let mut drained = 0;
                     while drained < MAX_DRAIN_PER_TAB {
                         match rx.try_recv() {
-                            Ok(_) => drained += 1,
+                            Ok(msg) => {
+                                drained += 1;
+                                if pending.len() >= MAX_PENDING_BUFFER {
+                                    pending.pop_front();
+                                }
+                                pending.push_back(msg);
+                            }
                             Err(_) => break,
                         }
                     }
+                    drop(pending);
                     drop(rx);
                 }
             }
         } else {
             for (_, tab_data) in tabs_map.iter() {
                 let rx = tab_data.rx.lock().unwrap();
+                let mut pending = tab_data.pending_messages.lock().unwrap();
                 let mut drained = 0;
                 while drained < MAX_DRAIN_PER_TAB {
                     match rx.try_recv() {
-                        Ok(_) => drained += 1,
+                        Ok(msg) => {
+                            drained += 1;
+                            if pending.len() >= MAX_PENDING_BUFFER {
+                                pending.pop_front();
+                            }
+                            pending.push_back(msg);
+                        }
                         Err(_) => break,
                     }
                 }
+                drop(pending);
                 drop(rx);
             }
         }
@@ -1513,42 +1587,39 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
-    // Keep-alive timer disabled - causes freezes when window loses focus.
-    // Audio context should keep WebView alive. If needed, re-enable with lower frequency.
-    /*
+    // Lightweight keep-alive for inactive/connected WebViews (5s interval)
+    // Only pings tabs that are connected but not currently visible to prevent
+    // WebKit from suspending their web process. Uses a no-op JS eval to keep
+    // the JS engine alive without triggering rendering or layout work.
     let tabs_keepalive = tabs.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
-        let tabs_map = tabs_keepalive.lock().unwrap();
-        for (_, tab_data) in tabs_map.iter() {
-            let webview = tab_data.webview.clone();
-            webview.evaluate_javascript(
-                r#"
-                if (document.body) {
-                    const height = document.body.offsetHeight;
-                    const width = document.body.offsetWidth;
-                    const container = document.getElementById('chat-container');
-                    if (container) {
-                        const currentOpacity = container.style.opacity;
-                        container.style.opacity = currentOpacity === '0.9999' ? '1' : '0.9999';
+    let tab_view_keepalive = tab_view.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(5), move || {
+        if let Some(selected_page) = tab_view_keepalive.selected_page() {
+            let tabs_map = tabs_keepalive.lock().unwrap();
+            for (_, tab_data) in tabs_map.iter() {
+                if tab_data.page != selected_page {
+                    let conn_state = tab_data.connection_state.lock().unwrap();
+                    let is_connected = matches!(*conn_state, ConnectionState::Connected(_));
+                    drop(conn_state);
+                    if is_connected {
+                        let webview = tab_data.webview.clone();
+                        webview.evaluate_javascript(
+                            "void(0);",
+                            None,
+                            None,
+                            None::<&adw::gio::Cancellable>,
+                            |result| {
+                                if let Err(e) = result {
+                                    eprintln!("Keep-alive JS eval failed for inactive tab: {}", e);
+                                }
+                            },
+                        );
                     }
-                    const scrollContainer = document.getElementById('chat-container');
-                    if (scrollContainer) {
-                        const scrollTop = scrollContainer.scrollTop;
-                        scrollContainer.scrollTop = scrollTop;
-                    }
-                    void 0;
                 }
-                "#,
-                None,
-                None,
-                None::<&adw::gio::Cancellable>,
-                |_| {},
-            );
+            }
         }
-        drop(tabs_map);
         glib::ControlFlow::Continue
     });
-    */
 
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
@@ -1882,6 +1953,7 @@ fn create_new_tab(
         last_js_execution: Arc::new(Mutex::new(Instant::now())),
         shutdown_flag,
         message_buffer,
+        pending_messages: Arc::new(Mutex::new(VecDeque::new())),
     };
     let tab_data_arc = Arc::new(tab_data);
     tabs.lock().unwrap().insert(tab_id.clone(), tab_data_arc.clone());
