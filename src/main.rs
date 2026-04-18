@@ -261,6 +261,30 @@ fn get_chat_html_template() -> &'static str {
       Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
       document.addEventListener('visibilitychange', (e) => e.stopImmediatePropagation(), true);
 
+      (function initAudioKeepAlive() {
+        let audioCtx = null;
+        function tick() {
+          try {
+            if (!audioCtx || audioCtx.state === 'closed') {
+              audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+              audioCtx.resume();
+            }
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.frequency.value = 1;
+            gain.gain.value = 0;
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.05);
+          } catch(e) {}
+          setTimeout(tick, 10000);
+        }
+        tick();
+      })();
+
       function maintainScrollPosition() {
         const currentScrollHeight = chatContainer.scrollHeight;
         const heightDiff = currentScrollHeight - lastScrollHeight;
@@ -359,6 +383,24 @@ fn get_chat_html_template() -> &'static str {
         if (messages.length > CLEANUP_THRESHOLD) {
           requestAnimationFrame(cleanupOldMessages);
         }
+      }
+
+      function replaceAllMessages(htmlString) {
+        messageQueue.length = 0;
+        const scrollBuffer = chatBody.querySelector('.scroll-buffer');
+        chatBody.innerHTML = '';
+        if (scrollBuffer) chatBody.appendChild(scrollBuffer);
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = htmlString;
+        const fragment = document.createDocumentFragment();
+        while (tempDiv.firstChild) {
+          fragment.appendChild(tempDiv.firstChild);
+        }
+        chatBody.appendChild(fragment);
+        messageCount = chatBody.getElementsByClassName('message-box').length;
+        isUserScrolling = false;
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+        lastScrollHeight = chatContainer.scrollHeight;
       }
 
       window.onload = function() {
@@ -1376,68 +1418,42 @@ fn build_ui(app: &Application) {
             let tabs_map = tabs_for_selection.lock().unwrap();
             for (_, tab_data) in tabs_map.iter() {
                 if tab_data.page == selected_page {
-                    println!("Processing active tab");
+                    {
+                        let mut pending = tab_data.pending_messages.lock().unwrap();
+                        pending.clear();
+                    }
 
-                    let webview = tab_data.webview.clone();
-                    webview.evaluate_javascript(
-                        "void(0);",
+                    let buf = tab_data.message_buffer.lock().unwrap();
+                    if buf.is_empty() {
+                        drop(buf);
+                        continue;
+                    }
+                    let all_html: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
+                    drop(buf);
+
+                    let escaped_html = escape_js_string(&all_html);
+                    let js_code = format!(
+                        r#"if (typeof replaceAllMessages === 'function') {{ replaceAllMessages('{}'); }}"#,
+                        escaped_html
+                    );
+                    let webview_flush = tab_data.webview.clone();
+                    let last_js_execution = tab_data.last_js_execution.clone();
+                    webview_flush.evaluate_javascript(
+                        &js_code,
                         None,
                         None,
                         None::<&adw::gio::Cancellable>,
-                        |result| {
-                            if result.is_err() {
-                                eprintln!("WebView health check failed on tab switch - may need reload");
+                        move |result| {
+                            match result {
+                                Ok(_) => {
+                                    *last_js_execution.lock().unwrap() = Instant::now();
+                                }
+                                Err(e) => {
+                                    eprintln!("Error restoring messages on tab switch: {}", e);
+                                }
                             }
                         },
                     );
-
-                    let mut pending = tab_data.pending_messages.lock().unwrap();
-                    if !pending.is_empty() {
-                        let channel_id_opt = pending.front().map(|m| m.channel_id.clone());
-                        if let Some(channel_id_str) = channel_id_opt {
-                            let emote_map = get_emote_map(&channel_id_str);
-                            let mut html_content = String::new();
-                            let mut count = 0;
-                            while let Some(msg) = pending.pop_front() {
-                                if count >= 30 { break; }
-                                let msg_html = parse_message_html(&msg, &emote_map);
-                                {
-                                    let mut buf = tab_data.message_buffer.lock().unwrap();
-                                    buf.push_back(msg_html.clone());
-                                    if buf.len() > 500 {
-                                        buf.pop_front();
-                                    }
-                                }
-                                html_content.push_str(&msg_html);
-                                html_content.push('\n');
-                                count += 1;
-                            }
-                            let escaped_html = escape_js_string(&html_content);
-                            let js_code = format!(
-                                r#"if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}"#,
-                                escaped_html
-                            );
-                            let webview_flush = tab_data.webview.clone();
-                            let last_js_execution = tab_data.last_js_execution.clone();
-                            webview_flush.evaluate_javascript(
-                                &js_code,
-                                None,
-                                None,
-                                None::<&adw::gio::Cancellable>,
-                                move |result| {
-                                    match result {
-                                        Ok(_) => {
-                                            *last_js_execution.lock().unwrap() = Instant::now();
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Error flushing pending messages: {}", e);
-                                        }
-                                    }
-                                },
-                            );
-                        }
-                    }
-                    drop(pending);
                 }
             }
         }
@@ -1471,7 +1487,8 @@ fn build_ui(app: &Application) {
 
         const MAX_BATCH_SIZE: usize = 30;
         const MAX_DRAIN_PER_TAB: usize = 50;
-        const MAX_PENDING_BUFFER: usize = 500;
+        const MAX_PENDING_BUFFER: usize = 2000;
+        const MAX_MESSAGE_BUFFER: usize = 2000;
 
         if let Some(selected_page) = tab_view_for_processing.selected_page() {
             for (_, tab_data) in tabs_map.iter() {
@@ -1510,7 +1527,7 @@ fn build_ui(app: &Application) {
                                 {
                                     let mut buf = message_buffer.lock().unwrap();
                                     buf.push_back(msg_html.clone());
-                                    if buf.len() > 500 {
+                                    if buf.len() > MAX_MESSAGE_BUFFER {
                                         buf.pop_front();
                                     }
                                 }
@@ -1543,44 +1560,66 @@ fn build_ui(app: &Application) {
                         }
                     }
                 } else {
-                    let rx = tab_data.rx.lock().unwrap();
-                    let mut pending = tab_data.pending_messages.lock().unwrap();
-                    let mut drained = 0;
-                    while drained < MAX_DRAIN_PER_TAB {
-                        match rx.try_recv() {
-                            Ok(msg) => {
-                                drained += 1;
-                                if pending.len() >= MAX_PENDING_BUFFER {
-                                    pending.pop_front();
-                                }
-                                pending.push_back(msg);
+                    let mut messages_to_buffer = Vec::new();
+                    {
+                        let rx = tab_data.rx.lock().unwrap();
+                        while messages_to_buffer.len() < MAX_DRAIN_PER_TAB {
+                            match rx.try_recv() {
+                                Ok(msg) => messages_to_buffer.push(msg),
+                                Err(_) => break,
                             }
-                            Err(_) => break,
                         }
                     }
-                    drop(pending);
-                    drop(rx);
-                }
-            }
-        } else {
-            for (_, tab_data) in tabs_map.iter() {
-                let rx = tab_data.rx.lock().unwrap();
-                let mut pending = tab_data.pending_messages.lock().unwrap();
-                let mut drained = 0;
-                while drained < MAX_DRAIN_PER_TAB {
-                    match rx.try_recv() {
-                        Ok(msg) => {
-                            drained += 1;
+
+                    if !messages_to_buffer.is_empty() {
+                        let channel_id_str = messages_to_buffer[0].channel_id.clone();
+                        let emote_map = get_emote_map(&channel_id_str);
+                        let mut buf = tab_data.message_buffer.lock().unwrap();
+                        let mut pending = tab_data.pending_messages.lock().unwrap();
+                        for msg in messages_to_buffer {
+                            let msg_html = parse_message_html(&msg, &emote_map);
+                            buf.push_back(msg_html);
+                            if buf.len() > MAX_MESSAGE_BUFFER {
+                                buf.pop_front();
+                            }
                             if pending.len() >= MAX_PENDING_BUFFER {
                                 pending.pop_front();
                             }
                             pending.push_back(msg);
                         }
-                        Err(_) => break,
                     }
                 }
-                drop(pending);
-                drop(rx);
+            }
+        } else {
+            for (_, tab_data) in tabs_map.iter() {
+                let mut messages_to_buffer = Vec::new();
+                {
+                    let rx = tab_data.rx.lock().unwrap();
+                    while messages_to_buffer.len() < MAX_DRAIN_PER_TAB {
+                        match rx.try_recv() {
+                            Ok(msg) => messages_to_buffer.push(msg),
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                if !messages_to_buffer.is_empty() {
+                    let channel_id_str = messages_to_buffer[0].channel_id.clone();
+                    let emote_map = get_emote_map(&channel_id_str);
+                    let mut buf = tab_data.message_buffer.lock().unwrap();
+                    let mut pending = tab_data.pending_messages.lock().unwrap();
+                    for msg in messages_to_buffer {
+                        let msg_html = parse_message_html(&msg, &emote_map);
+                        buf.push_back(msg_html);
+                        if buf.len() > MAX_MESSAGE_BUFFER {
+                            buf.pop_front();
+                        }
+                        if pending.len() >= MAX_PENDING_BUFFER {
+                            pending.pop_front();
+                        }
+                        pending.push_back(msg);
+                    }
+                }
             }
         }
 
@@ -1669,6 +1708,48 @@ fn build_ui(app: &Application) {
             drop(tabs_map);
         }
         glib::ControlFlow::Continue
+    });
+
+    let tabs_focus = tabs.clone();
+    window.connect_is_active_notify(move |win| {
+        if !win.is_active() {
+            return;
+        }
+        let tabs_map = tabs_focus.lock().unwrap();
+        for (_, tab_data) in tabs_map.iter() {
+            let conn_state = tab_data.connection_state.lock().unwrap();
+            let is_connected = matches!(*conn_state, ConnectionState::Connected(_));
+            drop(conn_state);
+            if !is_connected {
+                continue;
+            }
+
+            let buf = tab_data.message_buffer.lock().unwrap();
+            if buf.is_empty() {
+                drop(buf);
+                continue;
+            }
+            let all_html: String = buf.iter().cloned().collect::<Vec<_>>().join("\n");
+            drop(buf);
+
+            let escaped_html = escape_js_string(&all_html);
+            let js = format!(
+                "if (typeof replaceAllMessages === 'function') {{ replaceAllMessages('{}'); }}",
+                escaped_html
+            );
+            let webview = tab_data.webview.clone();
+            webview.evaluate_javascript(
+                &js,
+                None,
+                None,
+                None::<&adw::gio::Cancellable>,
+                |result| {
+                    if let Err(e) = result {
+                        eprintln!("Failed to re-inject messages on focus regain: {:?}", e);
+                    }
+                },
+            );
+        }
     });
 
     let new_tab_action = SimpleAction::new("new-tab", None);
@@ -1872,7 +1953,7 @@ fn create_new_tab(
                     .replace('\n', "\\n")
                     .replace('\r', "\\r");
                 let js = format!(
-                    "if (typeof appendMessages === 'function') {{ appendMessages('{}'); }}",
+                    "if (typeof replaceAllMessages === 'function') {{ replaceAllMessages('{}'); }}",
                     escaped_html
                 );
                 webview.evaluate_javascript(
@@ -1927,7 +2008,7 @@ fn create_new_tab(
     let page = tab_view.append(&tab_content);
     page.set_title(label);
 
-    let (tx, rx) = mpsc::sync_channel(200); // Larger buffer since all tabs are active
+    let (tx, rx) = mpsc::sync_channel(500);
     let (error_tx, error_rx) = mpsc::channel();
 
     let tab_count = tabs.lock().unwrap().len();
