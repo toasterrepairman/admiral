@@ -1711,10 +1711,17 @@ fn build_ui(app: &Application) {
     });
 
     let tabs_focus = tabs.clone();
+    let focus_debounce = Arc::new(Mutex::new(Instant::now()));
+    let focus_debounce_clone = focus_debounce.clone();
     window.connect_is_active_notify(move |win| {
         if !win.is_active() {
             return;
         }
+        let last_focus = *focus_debounce_clone.lock().unwrap();
+        if last_focus.elapsed() < std::time::Duration::from_millis(100) {
+            return;
+        }
+        *focus_debounce_clone.lock().unwrap() = Instant::now();
         let tabs_map = tabs_focus.lock().unwrap();
         for (_, tab_data) in tabs_map.iter() {
             let conn_state = tab_data.connection_state.lock().unwrap();
