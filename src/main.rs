@@ -257,34 +257,6 @@ fn get_chat_html_template() -> &'static str {
       };
       chatContainer.addEventListener('scroll', scrollEventHandler);
 
-      Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
-      Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
-      document.addEventListener('visibilitychange', (e) => e.stopImmediatePropagation(), true);
-
-      (function initAudioKeepAlive() {
-        let audioCtx = null;
-        function tick() {
-          try {
-            if (!audioCtx || audioCtx.state === 'closed') {
-              audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') {
-              audioCtx.resume();
-            }
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.frequency.value = 1;
-            gain.gain.value = 0;
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.start();
-            osc.stop(audioCtx.currentTime + 0.05);
-          } catch(e) {}
-          setTimeout(tick, 10000);
-        }
-        tick();
-      })();
-
       function maintainScrollPosition() {
         const currentScrollHeight = chatContainer.scrollHeight;
         const heightDiff = currentScrollHeight - lastScrollHeight;
@@ -1626,40 +1598,6 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
-    // Lightweight keep-alive for inactive/connected WebViews (5s interval)
-    // Only pings tabs that are connected but not currently visible to prevent
-    // WebKit from suspending their web process. Uses a no-op JS eval to keep
-    // the JS engine alive without triggering rendering or layout work.
-    let tabs_keepalive = tabs.clone();
-    let tab_view_keepalive = tab_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_secs(5), move || {
-        if let Some(selected_page) = tab_view_keepalive.selected_page() {
-            let tabs_map = tabs_keepalive.lock().unwrap();
-            for (_, tab_data) in tabs_map.iter() {
-                if tab_data.page != selected_page {
-                    let conn_state = tab_data.connection_state.lock().unwrap();
-                    let is_connected = matches!(*conn_state, ConnectionState::Connected(_));
-                    drop(conn_state);
-                    if is_connected {
-                        let webview = tab_data.webview.clone();
-                        webview.evaluate_javascript(
-                            "void(0);",
-                            None,
-                            None,
-                            None::<&adw::gio::Cancellable>,
-                            |result| {
-                                if let Err(e) = result {
-                                    eprintln!("Keep-alive JS eval failed for inactive tab: {}", e);
-                                }
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        glib::ControlFlow::Continue
-    });
-
     glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
         cleanup_emote_cache();
         cleanup_media_file_cache();
@@ -1920,9 +1858,6 @@ fn create_new_tab(
     let html_template = get_chat_html_template_with_color(get_background_color().as_deref());
     webview.load_html(&html_template, None);
 
-    // Keep WebView alive by creating a silent audio context (prevents process suspension)
-    // Also override page visibility to prevent WebKit from throttling when window is not focused
-    // Run after page load to ensure it executes properly
     webview.connect_load_changed(clone!(
         #[strong]
         webview,
